@@ -19,6 +19,21 @@ WORKSPACE="${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pw
 GENERAL_CONFIG="${GENERAL_CONFIG:-$WORKSPACE/configs/General.config}"
 DEVICE_CONFIG="${DEVICE_CONFIG:-$WORKSPACE/configs/IPQ807X.config}"
 THIRD_PARTY_SOURCES_FILE="${THIRD_PARTY_SOURCES_FILE:-$PWD/third-party-sources.txt}"
+# CI 里传进来的可能是相对路径（configs/xxx.config），而脚本运行在源码树，
+# 这里统一解析成真实存在的文件，避免"文件不存在"被误判成配置为空。
+resolve_existing() {
+  local candidate="$1"
+  if [ -f "$candidate" ]; then
+    printf '%s\n' "$candidate"
+  elif [ -f "$WORKSPACE/$candidate" ]; then
+    printf '%s\n' "$WORKSPACE/$candidate"
+  else
+    printf '%s\n' "$candidate"
+  fi
+}
+DEVICE_CONFIG="$(resolve_existing "$DEVICE_CONFIG")"
+GENERAL_CONFIG="$(resolve_existing "$GENERAL_CONFIG")"
+
 DEFAULT_THEME="${DEFAULT_THEME:-argon}"
 EASYTIER_VARIANT="${EASYTIER_VARIANT:-noweb}"   # noweb = 预编译二进制（快）；full = 源码编译（慢）
 SOURCE_TMP="${SOURCE_TMP:-$PWD/.custom-src}"
@@ -102,13 +117,18 @@ if [ -f "${CUSTOM_DIR}/packages.seed" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%%$'\r'}"
     case "$line" in
-      ''|'###'*) continue ;;
+      '') continue ;;
     esac
-    if [[ "$line" =~ ^#[[:space:]]+(CONFIG_[A-Za-z0-9_.-]+)[[:space:]]+is[[:space:]]+not[[:space:]]+set ]]; then
-      config_set "$GENERAL_CONFIG" "${BASH_REMATCH[1]}" n
-    elif [[ "$line" =~ ^(CONFIG_[A-Za-z0-9_.-]+)=(y|n|m|is[[:space:]]+not[[:space:]]+set)$ ]]; then
+    # 注释行：只有 "# CONFIG_xxx is not set" 是有效指令，其余说明文字静默跳过
+    if [[ "$line" =~ ^[[:space:]]*# ]]; then
+      if [[ "$line" =~ ^#[[:space:]]+(CONFIG_[A-Za-z0-9_.-]+)[[:space:]]+is[[:space:]]+not[[:space:]]+set ]]; then
+        config_set "$GENERAL_CONFIG" "${BASH_REMATCH[1]}" n
+      fi
+      continue
+    fi
+    if [[ "$line" =~ ^(CONFIG_[A-Za-z0-9_.-]+)=(y|n|m|is[[:space:]]+not[[:space:]]+set)$ ]]; then
       config_set "$GENERAL_CONFIG" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
-    elif [[ "$line" =~ ^(CONFIG_[A-Za-z0-9_.-]+)=(\"?[^\"]*\"?)$ ]]; then
+    elif [[ "$line" =~ ^(CONFIG_[A-Za-z0-9_.-]+)=(.*)$ ]]; then
       config_set "$GENERAL_CONFIG" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
     else
       warn "无法解析的定制行，已忽略: $line"
