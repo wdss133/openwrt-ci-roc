@@ -226,10 +226,14 @@ fi
 # 这些软链接，make defconfig 就看不到 → luci-app-store 会因硬依赖 luci-lib-taskd(>=1.0.19) 被丢弃。
 # 因此按官方文档走 feeds：加源 → update → install。（官方 README「集成到自己编译的固件中」一节）
 if [ -d "$PWD/feeds" ]; then
-  if ! grep -q 'linkease/istore' feeds.conf.default 2>/dev/null; then
-    printf '\nsrc-git istore https://github.com/linkease/istore;main\n' >> feeds.conf.default
-    log "  已向 feeds.conf.default 添加 istore feed"
-  fi
+  # scripts/feeds 优先读 feeds.conf（存在时），否则读 feeds.conf.default —— 两个都补一遍最稳
+  istore_feed_line='src-git istore https://github.com/linkease/istore;main'
+  for feed_file in feeds.conf feeds.conf.default; do
+    [ -f "$feed_file" ] || continue
+    grep -q 'linkease/istore' "$feed_file" || printf '\n%s\n' "$istore_feed_line" >> "$feed_file"
+  done
+  { [ -f feeds.conf ] || [ -f feeds.conf.default ]; } || printf '%s\n' "$istore_feed_line" > feeds.conf.default
+  log "  istore feed 已写入 feeds.conf(.default)"
   istore_ok=0
   for attempt in 1 2 3; do
     if ./scripts/feeds update istore; then istore_ok=1; break; fi
