@@ -348,6 +348,11 @@ jobs:
         [ -s "$OPENWRT_PATH/third-party-sources.txt" ] \
           && cp "$OPENWRT_PATH/third-party-sources.txt" "$ARTIFACT_PREFIX.third-party-sources.txt" \
           || echo "::warning::未生成 third-party-sources.txt"
+        if [ -f "$OPENWRT_PATH/$ARTIFACT_PREFIX.plugins.md" ]; then
+          cp "$OPENWRT_PATH/$ARTIFACT_PREFIX.plugins.md" "$ARTIFACT_PREFIX.plugins.md"
+        else
+          echo "::warning::未生成插件信息文件 $ARTIFACT_PREFIX.plugins.md"
+        fi
         rm -rf packages feeds.buildinfo version.buildinfo sha256sums profiles.json
         echo "firmware_path=$PWD" >> "$GITHUB_OUTPUT"
 
@@ -377,23 +382,41 @@ jobs:
         name: firmware-${{ env.ARTIFACT_PREFIX }}
         path: artifacts/firmware
 
+    - name: Prepare Release Meta(生成发布标签与插件信息)
+      id: meta
+      run: |
+        set -Eeuo pipefail
+        tag="${RELEASE_TAG}-$(date -u +%Y%m%d-%H%M)"
+        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+        echo "now=$(date -u '+%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
+        f="$(ls artifacts/firmware/*.plugins.md 2>/dev/null | head -n 1 || true)"
+        if [ -n "$f" ]; then
+          { echo "plugins<<PLUGINS_EOF"; cat "$f"; echo; echo "PLUGINS_EOF"; } >> "$GITHUB_OUTPUT"
+        else
+          echo "plugins=（未采集到插件版本信息）" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Upload Firmware To Release(发布固件)
       uses: ncipollo/release-action@v1
       with:
-        name: IPQ807X-Custom
-        allowUpdates: true
-        replacesArtifacts: true
+        name: ${{ steps.meta.outputs.tag }}
+        tag: ${{ steps.meta.outputs.tag }}
+        allowUpdates: false
+        replacesArtifacts: false
         artifactErrorsFailBuild: true
-        tag: ${{ env.RELEASE_TAG }}
         token: ${{ github.token }}
         artifacts: artifacts/firmware/*
         body: |
-          **IPQ807X 定制固件（每日自动编译，北京时间 21:00）**
+          **IPQ807X 定制固件（自动编译发布）**
           ### 📒 固件信息
           - 基于主线 laipeng668/openwrt-6.x（${{ env.SOURCE_BRANCH }}）自动同步编译
           - 默认主题：**argon**（已移除 Aurora 主题及配置插件）
-          - 已内置：**kmod-tun**、EasyTier、ZeroTier、ddns-go、iStore
+          - 已内置：**kmod-tun**、EasyTier、ZeroTier、ddns-go、iStore、wechatpush
           - 🌐 默认地址：**192.168.2.1**
           - 🔑 默认密码：none
           ### 🧊 固件版本
           - 内核版本：**${{ needs.Build.outputs.version_kernel }}**
+          - 编译时间：${{ steps.meta.outputs.now }}
+          - 目标机型：redmi_ax6-stock（squashfs: factory.ubi / sysupgrade.bin）
+          ### 🧩 内置插件（编译时拉取的上游版本）
+          ${{ steps.meta.outputs.plugins }}
