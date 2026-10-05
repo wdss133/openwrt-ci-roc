@@ -295,7 +295,7 @@ plugin_row "argon (luci-theme-argon)" "$(pkg_ver "$(find feeds package -path '*l
 plugin_row "EasyTier" "$(pkg_ver "package/easytier/luci-app-easytier/Makefile" "package/easytier/easytier-noweb/Makefile")" "$(git_date "$ez_dir")" "https://github.com/EasyTier/luci-app-easytier"
 plugin_row "ZeroTier" "$(pkg_ver "package/zerotier/Makefile")" "$(git_date "$zt_dir")" "https://github.com/mwarning/zerotier-openwrt"
 plugin_row "ddns-go" "$(pkg_ver "package/ddns-go/Makefile")" "$(git_date "$ddns_dir")" "https://github.com/sirpdboy/luci-app-ddns-go"
-plugin_row "iStore (luci-app-store)" "$(pkg_ver "feeds/istore/luci/luci-app-store/Makefile")" "$(git_date "feeds/istore")" "https://github.com/linkease/istore"
+plugin_row "iStore (luci-app-store)" "$(pkg_ver "package/luci-app-store/Makefile")" "$(git_date "$istore_src")" "https://github.com/linkease/istore"
 plugin_row "wechatpush (luci-app-wechatpush)" "$(pkg_ver "package/luci-app-wechatpush/Makefile")" "$(git_date "$wxp_dir")" "https://github.com/tty228/luci-app-wechatpush"
 log "  已生成插件版本信息: $PLUGIN_INFO_FILE"
 
