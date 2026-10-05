@@ -363,6 +363,9 @@ jobs:
 
   Release:
     needs: Build
+    # 显式 if：否则当 Sync-Upstream 被跳过（如 sync_upstream=false）时，
+    # 默认的 success() 门禁会因"存在被跳过的祖先 job"而失败，导致 Release 被跳过。
+    if: ${{ always() && needs.Build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
