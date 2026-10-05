@@ -232,7 +232,9 @@ if fetch_repo https://github.com/linkease/istore.git "$istore_src" main master; 
     if [ -d "$istore_src/luci/$pkg" ]; then
       safe_rm "package/$pkg"
       cp -a "$istore_src/luci/$pkg" "package/$pkg"
-      find "package/$pkg" -name Makefile -exec sed -i 's/[[:space:]]*+libuci-lua//' {} + 2>/dev/null || true
+      # 去掉本构建里无法满足的依赖：libuci-lua(24.10+已移除) / tar / mount-utils(未随本 profile 选中)。
+      # 这些会生成 `select PACKAGE_xxx`，目标未定义/不可选时会让该包在 defconfig 阶段被静默丢弃。
+      find "package/$pkg" -name Makefile -exec sed -i -E 's/[[:space:]]*\+(libuci-lua|tar|mount-utils)//g' {} + 2>/dev/null || true
       log "  已放入 package/$pkg"
     else
       warn "istore 缺少子包 luci/$pkg"; istore_ok=0
