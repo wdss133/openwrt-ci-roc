@@ -282,10 +282,36 @@ if [ ! -d "feeds/luci/themes/luci-theme-argon" ] && [ ! -d "package/luci-theme-a
 fi
 [ "$theme_switched" -eq 1 ] || warn "未在 feeds 中定位到 mediaurlbase 配置文件，已依赖 uci-defaults 兜底"
 
-############################ 5. 按 devices.exclude 剔除设备 ############################
-# 部分机型出厂分区很小（如 Zyxel NWA210AX 的 factory 镜像硬限制 60MB），
-# 包一多就会 "Image file ... is too big"，构建脚本删掉产物后 mkimage 必然失败。
-# 遇到这种情况把机型名写进 custom/devices.exclude 即可，不用改主线 config。
+############################ 5. 机型筛选（白名单优先，其次黑名单）############################
+# - devices.include：只编译这里列出的机型（其余全部取消），编译时间大幅缩短；
+# - devices.exclude：从剩余机型里再剔除（用于出厂分区过小的机型，
+#   例如 Zyxel NWA210AX 的 factory 镜像硬限制 60MB，包一多就 "Image file ... is too big"）。
+# 两个文件都支持 # 注释；include 有内容时以 include 为准。
+
+include_file="${CUSTOM_DIR}/devices.include"
+if [ -f "$include_file" ] && grep -qvE '^[[:space:]]*(#|$)' "$include_file"; then
+  keep_list=()
+  while IFS= read -r device || [ -n "$device" ]; do
+    device="${device%%$'\r'}"
+    case "$device" in
+      ''|\#*) continue ;;
+    esac
+    keep_list+=("$device")
+  done < "$include_file"
+
+  if [ "${#keep_list[@]}" -gt 0 ] && [ -f "$DEVICE_CONFIG" ]; then
+    # 先把所有机型置为未选中（kconfig 的 "# SYMBOL is not set" 写法），再逐个放行
+    sed -i -E '/^CONFIG_TARGET_DEVICE_/s/^/# /' "$DEVICE_CONFIG"
+    for device in "${keep_list[@]}"; do
+      if grep -qE "^# CONFIG_TARGET_DEVICE_[^=]*_DEVICE_${device}=y" "$DEVICE_CONFIG"; then
+        sed -i -E "/^# (CONFIG_TARGET_DEVICE_[^=]*_DEVICE_${device})=y/s/^# //" "$DEVICE_CONFIG"
+        log "白名单放行机型: $device"
+      else
+        warn "devices.include 中的 $device 在当前设备配置里不存在，已忽略"
+      fi
+    done
+  fi
+fi
 
 exclude_file="${CUSTOM_DIR}/devices.exclude"
 if [ -f "$exclude_file" ]; then
@@ -295,14 +321,11 @@ if [ -f "$exclude_file" ]; then
       ''|\#*) continue ;;
     esac
     if [ -f "$DEVICE_CONFIG" ]; then
-      before_count="$(grep -c "CONFIG_TARGET_DEVICE_" "$DEVICE_CONFIG" || true)"
-      sed -i -E "/CONFIG_TARGET_DEVICE_[^=]*_DEVICE_${device}=y/d" "$DEVICE_CONFIG"
-      after_count="$(grep -c "CONFIG_TARGET_DEVICE_" "$DEVICE_CONFIG" || true)"
-      if [ "$before_count" != "$after_count" ]; then
-        log "已剔除超限机型: $device"
-      else
-        warn "devices.exclude 中的 $device 未在设备配置里找到，跳过"
-      fi
+      before_count="$(grep -cE "^CONFIG_TARGET_DEVICE_" "$DEVICE_CONFIG" || true)"
+      sed -i -E "/^CONFIG_TARGET_DEVICE_[^=]*_DEVICE_${device}=y/d" "$DEVICE_CONFIG"
+      after_count="$(grep -cE "^CONFIG_TARGET_DEVICE_" "$DEVICE_CONFIG" || true)"
+      # 机型本来就没被选中（白名单已排除或上游改名）时静默跳过，不刷警告
+      [ "$before_count" != "$after_count" ] && log "已剔除机型: $device"
     fi
   done < "$exclude_file"
   remaining="$(grep -c "CONFIG_TARGET_DEVICE_" "$DEVICE_CONFIG" 2>/dev/null || echo 0)"

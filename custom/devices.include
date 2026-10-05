@@ -1,0 +1,5 @@
+### 只编译这些机型（白名单，填机型名，不带 CONFIG_TARGET_DEVICE_xxx_DEVICE_ 前缀）###
+### 本文件有内容时，其余机型全部不编译；全部注释掉则恢复全机型编译 ###
+### 机型名就是 configs/*.config 里 _DEVICE_ 后面的那一段 ###
+
+redmi_ax6-stock
