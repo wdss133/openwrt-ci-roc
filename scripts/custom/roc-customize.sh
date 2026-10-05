@@ -272,6 +272,31 @@ else
   warn "wechatpush 获取失败，本次编译将不含该插件"
 fi
 
+############################ 3.5 记录各插件版本与上游更新时间 ############################
+# 生成一个 markdown 表，随固件一起打包，并由 Release 写入发布说明。
+PLUGIN_INFO_FILE="${PLUGIN_INFO_FILE:-$PWD/${ARTIFACT_PREFIX:-IPQ807X-Custom}.plugins.md}"
+{
+  printf '| 插件 | 版本 | 上游最近更新 | 仓库 |\n'
+  printf '|---|---|---|---|\n'
+} > "$PLUGIN_INFO_FILE"
+pkg_ver() {
+  [ -f "$1" ] && grep -m1 -E '^[[:space:]]*PKG_VERSION[[:space:]]*:?=' "$1" 2>/dev/null \
+    | sed -E 's/^[^=]*=[[:space:]]*//' | tr -d ' \r' || true
+}
+git_date() { git -C "$1" log -1 --format=%cs 2>/dev/null || true; }
+plugin_row() {
+  local v="${2:-}"; local d="${3:-}"
+  printf '| %s | %s | %s | %s |\n' "$1" "${v:-(见固件清单)}" "${d:-(未知)}" "$4" >> "$PLUGIN_INFO_FILE"
+}
+plugin_row "kmod-tun" "$(pkg_ver "$(find feeds package -path '*kmod-tun/Makefile' -print -quit 2>/dev/null)")" "(随内核 6.12)" "openwrt base"
+plugin_row "argon (luci-theme-argon)" "$(pkg_ver "$(find feeds package -path '*luci-theme-argon/Makefile' -print -quit 2>/dev/null)")" "(随 luci feeds)" "openwrt/luci"
+plugin_row "EasyTier" "$(pkg_ver "package/easytier/luci-app-easytier/Makefile"; pkg_ver "package/easytier/easytier-noweb/Makefile")" "$(git_date "$ez_dir")" "https://github.com/EasyTier/luci-app-easytier"
+plugin_row "ZeroTier" "$(pkg_ver "package/zerotier/Makefile")" "$(git_date "$zt_dir")" "https://github.com/mwarning/zerotier-openwrt"
+plugin_row "ddns-go" "$(pkg_ver "package/ddns-go/Makefile")" "$(git_date "$ddns_dir")" "https://github.com/sirpdboy/luci-app-ddns-go"
+plugin_row "iStore (luci-app-store)" "$(pkg_ver "feeds/istore/luci/luci-app-store/Makefile")" "$(git_date "feeds/istore")" "https://github.com/linkease/istore"
+plugin_row "wechatpush (luci-app-wechatpush)" "$(pkg_ver "package/luci-app-wechatpush/Makefile")" "$(git_date "$wxp_dir")" "https://github.com/tty228/luci-app-wechatpush"
+log "  已生成插件版本信息: $PLUGIN_INFO_FILE"
+
 safe_rm "$SOURCE_TMP"
 
 ############################ 4. 默认主题切换为 argon ############################
