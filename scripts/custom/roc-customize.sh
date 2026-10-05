@@ -221,38 +221,31 @@ else
   warn "ddns-go 获取失败，本次编译将不含 ddns-go"
 fi
 
-# --- iStore（官方 feed 方式：feed update + feeds install，确保 luci-lib-taskd/taskd 等依赖被正确注册）---
-# 关键：OpenWrt 只把 "package/feeds/<feed>/..." 视为可用包；直接把目录拷进 feeds/ 不会生成
-# 这些软链接，make defconfig 就看不到 → luci-app-store 会因硬依赖 luci-lib-taskd(>=1.0.19) 被丢弃。
-# 因此按官方文档走 feeds：加源 → update → install。（官方 README「集成到自己编译的固件中」一节）
-if [ -d "$PWD/feeds" ]; then
-  # scripts/feeds 优先读 feeds.conf（存在时），否则读 feeds.conf.default —— 两个都补一遍最稳
-  istore_feed_line='src-git istore https://github.com/linkease/istore;main'
-  for feed_file in feeds.conf feeds.conf.default; do
-    [ -f "$feed_file" ] || continue
-    grep -q 'linkease/istore' "$feed_file" || printf '\n%s\n' "$istore_feed_line" >> "$feed_file"
-  done
-  { [ -f feeds.conf ] || [ -f feeds.conf.default ]; } || printf '%s\n' "$istore_feed_line" > feeds.conf.default
-  log "  istore feed 已写入 feeds.conf(.default)"
-  istore_ok=0
-  for attempt in 1 2 3; do
-    if ./scripts/feeds update istore; then istore_ok=1; break; fi
-    warn "scripts/feeds update istore 失败，重试 ${attempt}/3"
-    sleep $((attempt * 5))
+# --- iStore：4 个子包直接放到 package/ 顶层（与已验证可行的 wechatpush/zerotier 完全相同的落位）---
+# OpenWrt 的包扫描为：find -L package -name Makefile | grep 'call (Build/DefaultTargets|BuildPackage|KernelPackage)'
+# 只要 Makefile 自身含该串（luci 包末尾的 `# call BuildPackage` 注释即可命中）就会被注册。
+# 顶层 package/<pkg>/ 真实目录是本案唯一 100% 验证可行的落位（wechatpush / zerotier 均如此且成功）。
+istore_src="$SOURCE_TMP/istore"
+if fetch_repo https://github.com/linkease/istore.git "$istore_src" main master; then
+  istore_ok=1
+  for pkg in luci-app-store luci-lib-taskd luci-lib-xterm taskd; do
+    if [ -d "$istore_src/luci/$pkg" ]; then
+      safe_rm "package/$pkg"
+      cp -a "$istore_src/luci/$pkg" "package/$pkg"
+      find "package/$pkg" -name Makefile -exec sed -i 's/[[:space:]]*+libuci-lua//' {} + 2>/dev/null || true
+      log "  已放入 package/$pkg"
+    else
+      warn "istore 缺少子包 luci/$pkg"; istore_ok=0
+    fi
   done
   if [ "$istore_ok" -eq 1 ]; then
-    # OpenWrt 24.10+ 已移除 libuci-lua；feeds install 会解析依赖，先清掉这条已不存在的依赖
-    find feeds/istore -name Makefile -exec sed -i 's/[[:space:]]*+libuci-lua//' {} + 2>/dev/null || true
-    if ./scripts/feeds install -a -p istore; then
-      log "  istore feed 已 install（luci-app-store / luci-lib-taskd / luci-lib-xterm / taskd）"
-      config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-app-store y
-      config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-compat y
-    else
-      warn "scripts/feeds install -p istore 失败，本次编译可能不含 iStore"
-    fi
-  else
-    warn "istore feed 更新失败，本次编译将不含 iStore"
+    for sym in luci-app-store luci-lib-taskd luci-lib-xterm taskd luci-compat luci-lua-runtime; do
+      config_set "$GENERAL_CONFIG" "CONFIG_PACKAGE_$sym" y
+    done
+    log "  iStore 已按 package/ 顶层落位加入"
   fi
+else
+  warn "iStore 获取失败，本次编译将不含 iStore"
 fi
 
 # --- luci-app-wechatpush（微信 / Telegram / 邮件 推送通知）---
