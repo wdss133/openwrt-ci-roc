@@ -1,0 +1,9 @@
+### 需要排除的机型（填机型名，不带 CONFIG_TARGET_DEVICE_xxx_DEVICE_ 前缀）###
+### 每行一个，# 开头为注释；脚本会在生成 .config 前把这些机型删掉 ###
+### 出现 "Image file ... is too big" 时，把日志里那个机型名加到这里即可 ###
+
+# Zyxel NWA210AX / NWA110AX：factory 镜像硬限制 60MB（62914560 字节）
+# 加了 EasyTier + ZeroTier + ddns-go + iStore 后 rootfs 涨到约 66.5MB，必然构建失败。
+# 如果你刷的就是这两台：注释掉下面两行，并改为裁剪大体积包（优先去掉 passwall 的 xray-core）。
+zyxel_nwa210ax
+zyxel_nwa110ax

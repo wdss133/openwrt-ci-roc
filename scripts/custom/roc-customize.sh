@@ -214,6 +214,12 @@ if fetch_repo https://github.com/linkease/istore.git "$istore_dir" main master; 
   else
     warn "istore 目录结构变化，未找到 luci/ 子目录"
   fi
+  # OpenWrt 24.10 起已移除 libuci-lua，iStore 旧依赖满足不了会让 defconfig 直接丢掉这个包
+  store_makefile="$(find package/istore -maxdepth 3 -name Makefile -path '*luci-app-store*' -print -quit 2>/dev/null || true)"
+  if [ -n "$store_makefile" ] && grep -q 'libuci-lua' "$store_makefile"; then
+    sed -i 's/[[:space:]]*+libuci-lua//' "$store_makefile"
+    log "  已移除 luci-app-store 对 libuci-lua 的依赖（当前分支无此包）"
+  fi
 else
   warn "iStore 获取失败，本次编译将不含 iStore"
 fi
@@ -256,7 +262,35 @@ if [ ! -d "feeds/luci/themes/luci-theme-argon" ] && [ ! -d "package/luci-theme-a
 fi
 [ "$theme_switched" -eq 1 ] || warn "未在 feeds 中定位到 mediaurlbase 配置文件，已依赖 uci-defaults 兜底"
 
-############################ 5. 刷新索引并自检 ############################
+############################ 5. 按 devices.exclude 剔除设备 ############################
+# 部分机型出厂分区很小（如 Zyxel NWA210AX 的 factory 镜像硬限制 60MB），
+# 包一多就会 "Image file ... is too big"，构建脚本删掉产物后 mkimage 必然失败。
+# 遇到这种情况把机型名写进 custom/devices.exclude 即可，不用改主线 config。
+
+exclude_file="${CUSTOM_DIR}/devices.exclude"
+if [ -f "$exclude_file" ]; then
+  while IFS= read -r device || [ -n "$device" ]; do
+    device="${device%%$'\r'}"
+    case "$device" in
+      ''|\#*) continue ;;
+    esac
+    if [ -f "$DEVICE_CONFIG" ]; then
+      before_count="$(grep -c "CONFIG_TARGET_DEVICE_" "$DEVICE_CONFIG" || true)"
+      sed -i -E "/CONFIG_TARGET_DEVICE_[^=]*_DEVICE_${device}=y/d" "$DEVICE_CONFIG"
+      after_count="$(grep -c "CONFIG_TARGET_DEVICE_" "$DEVICE_CONFIG" || true)"
+      if [ "$before_count" != "$after_count" ]; then
+        log "已剔除超限机型: $device"
+      else
+        warn "devices.exclude 中的 $device 未在设备配置里找到，跳过"
+      fi
+    fi
+  done < "$exclude_file"
+  remaining="$(grep -c "CONFIG_TARGET_DEVICE_" "$DEVICE_CONFIG" 2>/dev/null || echo 0)"
+  log "剩余待编译机型数量: $remaining"
+  [ "$remaining" -gt 0 ] || die "设备被全部剔除，请检查 ${CUSTOM_DIR}/devices.exclude"
+fi
+
+############################ 6. 刷新索引并自检 ############################
 
 # 强制 make defconfig 重新扫描 package/ 树，保证新加入的包能被识别
 safe_rm tmp/.packageinfo tmp/.targetinfo tmp/.packageauxvars
