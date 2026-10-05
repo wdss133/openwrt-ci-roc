@@ -273,8 +273,15 @@ PLUGIN_INFO_FILE="${PLUGIN_INFO_FILE:-$PWD/${ARTIFACT_PREFIX:-IPQ807X-Custom}.pl
   printf '|---|---|---|---|\n'
 } > "$PLUGIN_INFO_FILE"
 pkg_ver() {
-  [ -f "$1" ] && grep -m1 -E '^[[:space:]]*PKG_VERSION[[:space:]]*:?=' "$1" 2>/dev/null \
-    | sed -E 's/^[^=]*=[[:space:]]*//' | tr -d ' \r' || true
+  local f v
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    v="$(grep -m1 -E '^[[:space:]]*PKG_VERSION[[:space:]]*:?=' "$f" 2>/dev/null | sed -E 's/^[^=]*=[[:space:]]*//' | tr -d ' \r')"
+    [ -n "$v" ] || continue
+    # 处理 $(or$(X),1.2.3) 这类 make 表达式：取最后一个逗号后的真实版本号
+    case "$v" in *'$('*) v="$(printf '%s' "$v" | sed -E 's/.*,([^,()]+)\)[^,()]*$/\1/')" ;; esac
+    printf '%s' "$v"; return 0
+  done
 }
 git_date() { git -C "$1" log -1 --format=%cs 2>/dev/null || true; }
 plugin_row() {
@@ -283,7 +290,7 @@ plugin_row() {
 }
 plugin_row "kmod-tun" "$(pkg_ver "$(find feeds package -path '*kmod-tun/Makefile' -print -quit 2>/dev/null)")" "(随内核 6.12)" "openwrt base"
 plugin_row "argon (luci-theme-argon)" "$(pkg_ver "$(find feeds package -path '*luci-theme-argon/Makefile' -print -quit 2>/dev/null)")" "(随 luci feeds)" "openwrt/luci"
-plugin_row "EasyTier" "$(pkg_ver "package/easytier/luci-app-easytier/Makefile"; pkg_ver "package/easytier/easytier-noweb/Makefile")" "$(git_date "$ez_dir")" "https://github.com/EasyTier/luci-app-easytier"
+plugin_row "EasyTier" "$(pkg_ver "package/easytier/luci-app-easytier/Makefile" "package/easytier/easytier-noweb/Makefile")" "$(git_date "$ez_dir")" "https://github.com/EasyTier/luci-app-easytier"
 plugin_row "ZeroTier" "$(pkg_ver "package/zerotier/Makefile")" "$(git_date "$zt_dir")" "https://github.com/mwarning/zerotier-openwrt"
 plugin_row "ddns-go" "$(pkg_ver "package/ddns-go/Makefile")" "$(git_date "$ddns_dir")" "https://github.com/sirpdboy/luci-app-ddns-go"
 plugin_row "iStore (luci-app-store)" "$(pkg_ver "feeds/istore/luci/luci-app-store/Makefile")" "$(git_date "feeds/istore")" "https://github.com/linkease/istore"
