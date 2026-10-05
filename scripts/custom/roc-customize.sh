@@ -221,25 +221,35 @@ else
   warn "ddns-go 获取失败，本次编译将不含 ddns-go"
 fi
 
-# --- iStore ---
+# --- iStore（官方做法：把各子包放进 feeds 对应目录，避免 package/ 嵌套导致 defconfig 扫不到）---
 if fetch_repo https://github.com/linkease/istore.git "$istore_dir" main master; then
   safe_rm package/istore
-  if [ -d "$istore_dir/luci" ]; then
-    mv "$istore_dir/luci" package/istore
-    config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-app-store y
-  elif [ -d "$istore_dir/luci-app-store" ]; then
-    mkdir -p package/istore
-    cp -a "$istore_dir/." package/istore/
-    config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-app-store y
-  else
-    warn "istore 目录结构变化，未找到 luci/ 子目录"
-  fi
-  # OpenWrt 24.10 起已移除 libuci-lua，iStore 旧依赖满足不了会让 defconfig 直接丢掉这个包
-  store_makefile="$(find package/istore -maxdepth 3 -name Makefile -path '*luci-app-store*' -print -quit 2>/dev/null || true)"
-  if [ -n "$store_makefile" ] && grep -q 'libuci-lua' "$store_makefile"; then
-    sed -i 's/[[:space:]]*+libuci-lua//' "$store_makefile"
-    log "  已移除 luci-app-store 对 libuci-lua 的依赖（当前分支无此包）"
-  fi
+  istore_luci="$istore_dir/luci"
+  [ -d "$istore_luci" ] || istore_luci="$istore_dir"   # 结构变化兜底
+  # 按 OpenWrt 约定放置：
+  #   feeds/luci/applications/  luci-app-store
+  #   feeds/luci/libs/          luci-lib-taskd, luci-lib-xterm
+  #   feeds/packages/utils/     taskd（后端守护进程）
+  move_istore_pkg() {
+    local src="$1" dst="$2"
+    [ -d "$src" ] || { warn "istore 子包缺失: $src"; return 0; }
+    safe_rm "$dst"
+    mkdir -p "$(dirname "$dst")"
+    mv "$src" "$dst"
+    # OpenWrt 24.10 起已移除 libuci-lua，相关依赖一并清掉，防止 defconfig 把 iStore 丢掉
+    find "$dst" -name Makefile -exec sed -i 's/[[:space:]]*+libuci-lua//' {} +
+    log "  已注入 istore 子包: $dst"
+  }
+  move_istore_pkg "$istore_luci/luci-app-store" "feeds/luci/applications/luci-app-store"
+  move_istore_pkg "$istore_luci/luci-lib-taskd" "feeds/luci/libs/luci-lib-taskd"
+  move_istore_pkg "$istore_luci/luci-lib-xterm" "feeds/luci/libs/luci-lib-xterm"
+  move_istore_pkg "$istore_luci/taskd"          "feeds/packages/utils/taskd"
+  config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-app-store y
+  # 依赖（luci-lib-taskd / taskd / luci-lib-xterm）由 + 软依赖自动带入，这里再显式确保开启
+  config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-lib-taskd y
+  config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-lib-xterm y
+  config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_taskd y
+  log "iStore 已按 feeds 方式注入（luci-app-store / luci-lib-taskd / taskd）"
 else
   warn "iStore 获取失败，本次编译将不含 iStore"
 fi
