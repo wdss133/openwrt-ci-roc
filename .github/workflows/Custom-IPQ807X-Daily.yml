@@ -275,6 +275,17 @@ jobs:
         done
         echo "  scan candidates: $(find -L package -name Makefile 2>/dev/null | xargs grep -lE 'call (Build/DefaultTargets|BuildPackage|KernelPackage)' 2>/dev/null | grep -Ei 'store|taskd|xterm' | tr '\n' ' ')"
         make defconfig
+        echo "---- iStore DUMP 诊断 ----"
+        if [ -f tmp/.config-package.in ]; then
+          echo "  kconfig has PACKAGE_luci-app-store: $(grep -c 'config PACKAGE_luci-app-store' tmp/.config-package.in 2>/dev/null || echo 0)"
+          echo "  kconfig luci-app-store depends block:"
+          awk '/config PACKAGE_luci-app-store$/{f=1} f{print} f&&/^\t\thelp/{f=0}' tmp/.config-package.in 2>/dev/null | head -25
+        fi
+        if [ -f logs/package/luci-app-store/dump.txt ]; then
+          echo "  === luci-app-store DUMP ERROR ==="; tail -25 logs/package/luci-app-store/dump.txt
+        else
+          echo "  luci-app-store dump.txt: (none — dump succeeded)"
+        fi
         echo "---- 关键项自检 ----"
         for sym in CONFIG_PACKAGE_kmod-tun CONFIG_PACKAGE_luci-theme-argon \
                    CONFIG_PACKAGE_zerotier CONFIG_PACKAGE_luci-app-zerotier \
