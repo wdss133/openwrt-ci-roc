@@ -264,12 +264,24 @@ jobs:
         cd "$OPENWRT_PATH"
         cat "$GITHUB_WORKSPACE/$DEVICE_CONFIG" "$GITHUB_WORKSPACE/$GENERAL_CONFIG" > .config
         sed -i '/CONFIG_PACKAGE_sqm-scripts-nss=y/d' .config
+        echo "---- iStore 落位自检 ----"
+        for p in luci-app-store luci-lib-taskd luci-lib-xterm taskd; do
+          if [ -f "package/$p/Makefile" ]; then
+            hit="$(grep -lE 'call (Build/DefaultTargets|BuildPackage|KernelPackage)' "package/$p/Makefile" >/dev/null 2>&1 && echo GREP-MATCH || echo NO-GREP-MATCH)"
+            echo "  package/$p/Makefile: EXISTS ($hit)"
+          else
+            echo "  package/$p/Makefile: MISSING"
+          fi
+        done
+        echo "  scan candidates: $(find -L package -name Makefile 2>/dev/null | xargs grep -lE 'call (Build/DefaultTargets|BuildPackage|KernelPackage)' 2>/dev/null | grep -Ei 'store|taskd|xterm' | tr '\n' ' ')"
         make defconfig
         echo "---- 关键项自检 ----"
         for sym in CONFIG_PACKAGE_kmod-tun CONFIG_PACKAGE_luci-theme-argon \
                    CONFIG_PACKAGE_zerotier CONFIG_PACKAGE_luci-app-zerotier \
                    CONFIG_PACKAGE_luci-app-easytier CONFIG_PACKAGE_luci-app-ddns-go \
-                   CONFIG_PACKAGE_luci-app-store; do
+                   CONFIG_PACKAGE_luci-app-wechatpush \
+                   CONFIG_PACKAGE_luci-app-store CONFIG_PACKAGE_luci-lib-taskd \
+                   CONFIG_PACKAGE_luci-lib-xterm CONFIG_PACKAGE_taskd; do
           if grep -q "^${sym}=[ym]" .config; then
             echo "OK   ${sym}"
           else
