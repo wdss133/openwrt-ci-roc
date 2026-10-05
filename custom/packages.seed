@@ -23,5 +23,10 @@ CONFIG_PACKAGE_luci-app-zerotier=y
 CONFIG_PACKAGE_ddns-go=y
 CONFIG_PACKAGE_luci-app-ddns-go=y
 
-# ---- iStore 软件商店 ----
+# ---- iStore 软件商店（脚本按官方 feed 方式安装，见 roc-customize.sh）----
 CONFIG_PACKAGE_luci-app-store=y
+# 19.07+ / Lua 插件兼容层，iStore 及部分 Lua 应用需要
+CONFIG_PACKAGE_luci-compat=y
+
+# ---- luci-app-wechatpush（微信 / Telegram / 邮件 推送通知）----
+CONFIG_PACKAGE_luci-app-wechatpush=y
