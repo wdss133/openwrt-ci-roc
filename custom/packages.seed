@@ -1,0 +1,27 @@
+### IPQ807X 定制软件包清单 ###
+### 以后想加包 / 删包，只改这个文件，不用动 configs/General.config 等主线文件 ###
+### 格式完全等同 OpenWrt .config：CONFIG_PACKAGE_包名=y 或 # CONFIG_PACKAGE_包名 is not set ###
+
+# ---- 主题：用 argon 顶替 aurora ----
+CONFIG_PACKAGE_luci-theme-argon=y
+CONFIG_PACKAGE_luci-app-argon-config=y
+# CONFIG_PACKAGE_luci-theme-aurora is not set
+# CONFIG_PACKAGE_luci-app-aurora-config is not set
+
+# ---- 内核模块：ZeroTier / EasyTier 都依赖 TUN ----
+CONFIG_PACKAGE_kmod-tun=y
+
+# ---- EasyTier（默认 noweb 预编译版，编译快；要完整版把下行换成 CONFIG_PACKAGE_easytier=y）----
+CONFIG_PACKAGE_easytier-noweb=y
+CONFIG_PACKAGE_luci-app-easytier=y
+
+# ---- ZeroTier ----
+CONFIG_PACKAGE_zerotier=y
+CONFIG_PACKAGE_luci-app-zerotier=y
+
+# ---- ddns-go ----
+CONFIG_PACKAGE_ddns-go=y
+CONFIG_PACKAGE_luci-app-ddns-go=y
+
+# ---- iStore 软件商店 ----
+CONFIG_PACKAGE_luci-app-store=y

@@ -1,0 +1,396 @@
+name: Custom-IPQ807X-Daily
+
+# 每天北京时间 21:00（UTC 13:00）自动：同步上游主线 -> 应用定制 -> 编译 IPQ807X -> 发布
+# 本文件是新增文件，不修改上游任何既有文件，因此上游同步不会冲突。
+#
+# 前置设置（只需一次）：
+#   Settings -> Actions -> General -> Workflow permissions -> 选 "Read and write permissions"
+#   否则同步结果无法回推、Release 无法创建（编译本身不受影响）。
+on:
+  schedule:
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+    inputs:
+      sync_upstream:
+        description: 编译前先同步上游主线
+        required: false
+        type: boolean
+        default: true
+      easytier_variant:
+        description: EasyTier 版本（noweb=预编译二进制，编译快；full=源码编译，很慢）
+        required: false
+        type: choice
+        options:
+          - noweb
+          - full
+        default: noweb
+
+permissions:
+  contents: write
+  actions: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  TZ: Asia/Shanghai
+  OPENWRT_PATH: /mnt/openwrt
+  UPSTREAM_REPO: https://github.com/laipeng668/openwrt-ci-roc.git
+  UPSTREAM_BRANCH: master
+  SOURCE_URL: https://github.com/laipeng668/openwrt-6.x.git
+  SOURCE_BRANCH: 25.12-nss
+  KERNEL_FILE: kernel-6.12
+  DEVICE_CONFIG: configs/IPQ807X.config
+  GENERAL_CONFIG: configs/General.config
+  DIY_SCRIPT: scripts/Roc-script.sh
+  CUSTOM_SCRIPT: scripts/custom/roc-customize.sh
+  CUSTOM_BRANCH: custom-ipq807x
+  CUSTOM_DIR: custom
+  ARTIFACT_PREFIX: IPQ807X-Custom
+  RELEASE_TAG: IPQ807X-Custom
+
+jobs:
+
+  Sync-Upstream:
+    if: ${{ github.event_name == 'schedule' || inputs.sync_upstream }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      synced: ${{ steps.sync.outputs.synced }}
+    steps:
+    - name: Checkout(检出代码)
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Sync Upstream(同步上游主线)
+      id: sync
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -Eeuo pipefail
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git remote add upstream "$UPSTREAM_REPO" 2>/dev/null || git remote set-url upstream "$UPSTREAM_REPO"
+        git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+        # 本仓库只在 master 上"新增"自有文件，理论上永远不会有真正冲突；
+        # 万一上游新建了同名文件，-X ours 保留本仓库版本，不会让流水线中断。
+        if git merge --no-edit -X ours "upstream/$UPSTREAM_BRANCH"; then
+          # 推送失败不影响编译：多是仓库设置里 GITHUB_TOKEN 只读，
+          # 到 Settings -> Actions -> General -> Workflow permissions 选 Read and write 即可。
+          if git push origin "HEAD:$UPSTREAM_BRANCH"; then
+            echo "synced=true" >> "$GITHUB_OUTPUT"
+            echo "上游主线已同步并推送"
+          else
+            echo "synced=local" >> "$GITHUB_OUTPUT"
+            echo "::warning::同步结果未能推送（GITHUB_TOKEN 可能只读），本次使用已合并的本地副本编译"
+          fi
+        else
+          git merge --abort || true
+          echo "synced=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::上游同步出现冲突，已保留本仓库版本继续编译"
+        fi
+
+  Build:
+    needs: Sync-Upstream
+    if: ${{ always() && needs.Sync-Upstream.result != 'failure' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version_kernel: ${{ steps.source.outputs.version_kernel }}
+      artifact_name: ${{ steps.variables.outputs.artifact_name }}
+    concurrency:
+      group: custom-ipq807x-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+    - name: Check Server Performance(检查服务器性能)
+      run: |
+        echo "CPU核心信息：$(grep name /proc/cpuinfo | cut -f2 -d: | uniq -c)"
+        df -hT
+
+    - name: Initialization Environment(初始化环境)
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo -E apt-get -y update
+        sudo -E apt-get -y install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+          git gperf haveged help2man intltool jq libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libfuse-dev libssl-dev libtool lrzsz \
+          genisoimage msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip libpython3-dev qemu-utils \
+          rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+        sudo -E systemctl daemon-reload
+        sudo timedatectl set-timezone "$TZ"
+
+    - name: Checkout(检出代码)
+      uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+
+    - name: Fetch Custom Overlay(拉取定制分支配置)
+      run: |
+        set -Eeuo pipefail
+        if git ls-remote --exit-code --heads origin "$CUSTOM_BRANCH" >/dev/null 2>&1; then
+          git fetch --depth=1 --no-tags origin "$CUSTOM_BRANCH"
+          if git checkout FETCH_HEAD -- "$CUSTOM_DIR"; then
+            echo "已应用 $CUSTOM_BRANCH 分支的定制配置"
+            ls -l "$CUSTOM_DIR"
+          else
+            echo "::warning::$CUSTOM_BRANCH 分支没有 $CUSTOM_DIR 目录，使用仓库默认配置"
+          fi
+        else
+          echo "::warning::未找到分支 $CUSTOM_BRANCH，使用仓库默认定制配置"
+        fi
+
+    - name: Clone Source Code(克隆源代码)
+      id: source
+      run: |
+        set -Eeuo pipefail
+        df -hT "$GITHUB_WORKSPACE"
+        sudo mkdir -p "$OPENWRT_PATH"
+        sudo chown -R "$(id -u):$(id -g)" "$OPENWRT_PATH"
+        for attempt in 1 2 3; do
+          if git clone --depth 1 -b "$SOURCE_BRANCH" --single-branch "$SOURCE_URL" "$OPENWRT_PATH"; then
+            break
+          fi
+          if [ "$attempt" -eq 3 ]; then
+            echo "Error: source clone failed after $attempt attempts" >&2
+            exit 1
+          fi
+          echo "::warning::源码克隆失败 (attempt $attempt/3)，重试中"
+          sudo rm -rf "$OPENWRT_PATH"
+          sudo mkdir -p "$OPENWRT_PATH"
+          sudo chown -R "$(id -u):$(id -g)" "$OPENWRT_PATH"
+          sleep $((attempt * 5))
+        done
+        cd "$OPENWRT_PATH"
+        VERSION_INFO="$(git show -s --date=short --format="作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H")"
+        {
+          echo "version_info<<EOF"
+          echo "$VERSION_INFO"
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+        VERSION_KERNEL="$(grep -oP 'LINUX_KERNEL_HASH-\K[0-9]+\.[0-9]+\.[0-9]+' "target/linux/generic/$KERNEL_FILE" | head -n 1 || true)"
+        echo "version_kernel=${VERSION_KERNEL:-unknown}" >> "$GITHUB_OUTPUT"
+        echo "source_hash=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+    - name: Disable Mainland Mirrors(屏蔽大陆下载源)
+      run: |
+        set -Eeuo pipefail
+        cd "$OPENWRT_PATH"
+        mirror_file="scripts/projectsmirrors.json"
+        if [ -f "$mirror_file" ]; then
+          jq '
+            with_entries(
+              .value |= map(select(
+                test("^https?://(mirrors\\.tencent\\.com|mirrors\\.aliyun\\.com|mirrors\\.tuna\\.tsinghua\\.edu\\.cn|mirrors\\.ustc\\.edu\\.cn|mirror\\.iscas\\.ac\\.cn|mirror\\.nju\\.edu\\.cn)(/|$)")
+                | not
+              ))
+            )
+          ' "$mirror_file" > "$mirror_file.tmp"
+          mv "$mirror_file.tmp" "$mirror_file"
+        else
+          echo "::warning::未找到 $mirror_file，跳过镜像处理"
+        fi
+        [ -f scripts/download.pl ] && sed -i '/raw\.gitmirror\.com/d' scripts/download.pl || true
+
+    - name: Generate Variables(生成变量)
+      id: variables
+      env:
+        SOURCE_HASH: ${{ steps.source.outputs.source_hash }}
+      run: |
+        set -Eeuo pipefail
+        OVERLAY_FILE="$GITHUB_WORKSPACE/$CUSTOM_DIR/packages.seed"
+        [ -f "$OVERLAY_FILE" ] || OVERLAY_FILE=""
+        CUSTOMIZATION_HASH="${{ hashFiles('scripts/custom/roc-customize.sh', 'configs/General.config', 'configs/IPQ807X.config', 'custom/packages.seed') }}"
+        CUSTOMIZATION_HASH="${CUSTOMIZATION_HASH:0:7}"
+        CACHE_PREFIX="openwrt-custom-ipq807x-${SOURCE_BRANCH//[^A-Za-z0-9_-]/_}"
+        {
+          echo "CCACHE_KEY=${CACHE_PREFIX}-ccache-${CUSTOMIZATION_HASH}-${SOURCE_HASH}"
+          echo "STAGING_KEY=${CACHE_PREFIX}-staging-${CUSTOMIZATION_HASH}-${SOURCE_HASH}"
+          echo "CCACHE_RESTORE_PREFIX=${CACHE_PREFIX}-ccache-"
+          echo "STAGING_RESTORE_PREFIX=${CACHE_PREFIX}-staging-"
+        } >> "$GITHUB_ENV"
+        echo "artifact_name=firmware-${ARTIFACT_PREFIX}" >> "$GITHUB_OUTPUT"
+
+    - name: Cache Ccache(缓存编译结果)
+      uses: actions/cache@v4
+      with:
+        key: ${{ env.CCACHE_KEY }}
+        restore-keys: ${{ env.CCACHE_RESTORE_PREFIX }}
+        path: ${{ env.OPENWRT_PATH }}/.ccache
+
+    - name: Cache Staging Directory(缓存工具链)
+      uses: actions/cache@v4
+      with:
+        key: ${{ env.STAGING_KEY }}
+        restore-keys: ${{ env.STAGING_RESTORE_PREFIX }}
+        path: ${{ env.OPENWRT_PATH }}/staging_dir
+
+    - name: Update Feeds(更新feeds)
+      run: |
+        set -Eeuo pipefail
+        cd "$OPENWRT_PATH"
+        ./scripts/feeds update -a
+
+    - name: Load Custom Configuration(加载自定义配置)
+      env:
+        EASYTIER_VARIANT: ${{ inputs.easytier_variant || 'noweb' }}
+      run: |
+        set -Eeuo pipefail
+        cd "$OPENWRT_PATH"
+        # 1) 先跑主线的 Roc-script.sh：默认 IP、主机名、署名、argon 源等保持主线行为
+        chmod +x "$GITHUB_WORKSPACE/$DIY_SCRIPT"
+        "$GITHUB_WORKSPACE/$DIY_SCRIPT" \
+          "$GITHUB_WORKSPACE/$DEVICE_CONFIG" \
+          "$GITHUB_WORKSPACE/$GENERAL_CONFIG"
+        # 2) 再跑我们的定制脚本：改主题、删 aurora、拉 EasyTier/ZeroTier/ddns-go/iStore
+        chmod +x "$GITHUB_WORKSPACE/$CUSTOM_SCRIPT"
+        CUSTOM_DIR="$GITHUB_WORKSPACE/$CUSTOM_DIR" \
+        GENERAL_CONFIG="$GITHUB_WORKSPACE/$GENERAL_CONFIG" \
+        EASYTIER_VARIANT="$EASYTIER_VARIANT" \
+          "$GITHUB_WORKSPACE/$CUSTOM_SCRIPT" "$GITHUB_WORKSPACE/$CUSTOM_DIR"
+
+    - name: Generate Final Config(生成最终配置)
+      run: |
+        set -Eeuo pipefail
+        cd "$OPENWRT_PATH"
+        cat "$GITHUB_WORKSPACE/$DEVICE_CONFIG" "$GITHUB_WORKSPACE/$GENERAL_CONFIG" > .config
+        sed -i '/CONFIG_PACKAGE_sqm-scripts-nss=y/d' .config
+        make defconfig
+        echo "---- 关键项自检 ----"
+        for sym in CONFIG_PACKAGE_kmod-tun CONFIG_PACKAGE_luci-theme-argon \
+                   CONFIG_PACKAGE_zerotier CONFIG_PACKAGE_luci-app-zerotier \
+                   CONFIG_PACKAGE_luci-app-easytier CONFIG_PACKAGE_luci-app-ddns-go \
+                   CONFIG_PACKAGE_luci-app-store; do
+          if grep -q "^${sym}=[ym]" .config; then
+            echo "OK   ${sym}"
+          else
+            echo "::warning::最终配置中缺少 ${sym}（依赖不满足或上游改名，不影响编译继续）"
+          fi
+        done
+        if grep -q "^CONFIG_PACKAGE_luci-theme-aurora=[ym]" .config; then
+          echo "::warning::Aurora 主题仍被选中，请检查定制脚本"
+        else
+          echo "OK   Aurora 已移除"
+        fi
+
+    - name: Download DL Package(下载DL软件包)
+      run: |
+        set -Eeuo pipefail
+        cd "$OPENWRT_PATH"
+        if [ -d staging_dir ]; then
+          tools_stamp="$(find staging_dir/host -maxdepth 2 -type f -name '.tools_compile*' -print -quit 2>/dev/null || true)"
+          if [ -n "$tools_stamp" ]; then
+            find staging_dir/host/stamp -maxdepth 1 -type f ! -name '.tools_compile*' -exec touch {} + 2>/dev/null || true
+            find staging_dir/host -maxdepth 2 -type f -name '.tools_compile*' -exec touch {} +
+          fi
+          for toolchain_dir in staging_dir/toolchain-*; do
+            [ -d "$toolchain_dir" ] || continue
+            toolchain_stamp="$(find "$toolchain_dir" -maxdepth 2 -type f -name '.toolchain_compile*' -print -quit)"
+            [ -n "$toolchain_stamp" ] || continue
+            if [ -d "$toolchain_dir/stamp" ]; then
+              find "$toolchain_dir/stamp" -maxdepth 1 -type f ! -name '.toolchain_compile*' -exec touch {} +
+            fi
+            find "$toolchain_dir" -maxdepth 2 -type f -name '.toolchain_compile*' -exec touch {} +
+          done
+        fi
+        for attempt in 1 2 3; do
+          if make download -j"$(nproc)"; then
+            break
+          fi
+          if [ "$attempt" -eq 3 ]; then
+            echo "Error: make download failed after $attempt attempts" >&2
+            exit 1
+          fi
+          echo "::warning::make download 失败 (attempt $attempt/3)，清理不完整文件后重试"
+          find dl -type f -size -1024c -print -delete
+          sleep $((attempt * 5))
+        done
+
+    - name: Compile Firmware(开始编译固件)
+      run: |
+        cd "$OPENWRT_PATH"
+        echo -e "$(nproc) thread compile"
+        make -j"$(nproc)" || make -j1 V=s
+
+    - name: Check Space Usage(检查空间使用情况)
+      if: ${{ !cancelled() }}
+      run: df -hT
+
+    - name: Organize Files(整理文件)
+      id: organize
+      run: |
+        set -Eeuo pipefail
+        cd "$OPENWRT_PATH"/bin/targets/*/*
+        cp "$OPENWRT_PATH/.config" "$ARTIFACT_PREFIX.config"
+        [ -f config.buildinfo ] && mv config.buildinfo "$ARTIFACT_PREFIX.config.buildinfo" || true
+        manifest_file="$(ls ./*.manifest 2>/dev/null | head -n 1 || true)"
+        [ -n "$manifest_file" ] && mv "$manifest_file" "$ARTIFACT_PREFIX.manifest" || echo "::warning::未找到 manifest 文件"
+        mkdir -p packages
+        package_count=0
+        while IFS= read -r -d '' package_file; do
+          mv -f "$package_file" packages/
+          package_count=$((package_count + 1))
+        done < <(find "$OPENWRT_PATH/bin/packages" -type f \( -name '*.apk' -o -name '*.ipk' \) -print0)
+        if [ "$package_count" -eq 0 ]; then
+          echo "Error: 未在 $OPENWRT_PATH/bin/packages 下找到任何软件包" >&2
+          exit 1
+        fi
+        tar -zcf "$ARTIFACT_PREFIX.Packages.tar.gz" packages
+        [ -s "$OPENWRT_PATH/third-party-sources.txt" ] \
+          && cp "$OPENWRT_PATH/third-party-sources.txt" "$ARTIFACT_PREFIX.third-party-sources.txt" \
+          || echo "::warning::未生成 third-party-sources.txt"
+        rm -rf packages feeds.buildinfo version.buildinfo sha256sums profiles.json
+        echo "firmware_path=$PWD" >> "$GITHUB_OUTPUT"
+
+    - name: Upload Firmware Artifact(上传固件产物)
+      uses: actions/upload-artifact@v4
+      with:
+        name: firmware-${{ env.ARTIFACT_PREFIX }}
+        path: ${{ steps.organize.outputs.firmware_path }}/*
+        if-no-files-found: error
+        compression-level: 0
+        overwrite: true
+        retention-days: 3
+
+  Release:
+    needs: Build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+    - name: Download Firmware Artifact(下载固件产物)
+      uses: actions/download-artifact@v4
+      with:
+        name: firmware-${{ env.ARTIFACT_PREFIX }}
+        path: artifacts/firmware
+
+    - name: Upload Firmware To Release(发布固件)
+      uses: ncipollo/release-action@v1
+      with:
+        name: IPQ807X-Custom
+        allowUpdates: true
+        replacesArtifacts: true
+        artifactErrorsFailBuild: true
+        tag: ${{ env.RELEASE_TAG }}
+        token: ${{ github.token }}
+        artifacts: artifacts/firmware/*
+        body: |
+          **IPQ807X 定制固件（每日自动编译，北京时间 21:00）**
+          ### 📒 固件信息
+          - 基于主线 laipeng668/openwrt-6.x（${{ env.SOURCE_BRANCH }}）自动同步编译
+          - 默认主题：**argon**（已移除 Aurora 主题及配置插件）
+          - 已内置：**kmod-tun**、EasyTier、ZeroTier、ddns-go、iStore
+          - 🌐 默认地址：**192.168.2.1**
+          - 🔑 默认密码：none
+          ### 🧊 固件版本
+          - 内核版本：**${{ needs.Build.outputs.version_kernel }}**

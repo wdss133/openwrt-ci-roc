@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+#
+# roc-customize.sh —— IPQ807X 定制补丁脚本（幂等 / 耐上游变化）
+#
+# 运行位置：OpenWrt 源码树根目录（例如 /mnt/openwrt）
+# 调用方式：$GITHUB_WORKSPACE/scripts/custom/roc-customize.sh [custom目录]
+#
+# 设计原则（为了"上游怎么变都能一直用"）：
+#   1. 绝不修改 fork 仓库里的主线文件，所有改动只发生在源码树和 CI 工作区副本上；
+#   2. 所有写操作幂等，可重复执行；所有删除操作先判断存在性，缺失不报错；
+#   3. 外部仓库一律"探测分支 + 失败重试"，上游把默认分支从 master 改成 main 也不会打断；
+#   4. 软件包清单集中在 custom/packages.seed，增删包不用改脚本；
+#   5. 关键项（argon 主题、kmod-tun）缺失才报错，其余缺失只告警，避免上游小改动直接把流水线打断。
+#
+set -Eeuo pipefail
+
+CUSTOM_DIR="${1:-${CUSTOM_DIR:-${GITHUB_WORKSPACE:-$PWD}/custom}}"
+WORKSPACE="${GITHUB_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+GENERAL_CONFIG="${GENERAL_CONFIG:-$WORKSPACE/configs/General.config}"
+DEVICE_CONFIG="${DEVICE_CONFIG:-$WORKSPACE/configs/IPQ807X.config}"
+THIRD_PARTY_SOURCES_FILE="${THIRD_PARTY_SOURCES_FILE:-$PWD/third-party-sources.txt}"
+DEFAULT_THEME="${DEFAULT_THEME:-argon}"
+EASYTIER_VARIANT="${EASYTIER_VARIANT:-noweb}"   # noweb = 预编译二进制（快）；full = 源码编译（慢）
+SOURCE_TMP="${SOURCE_TMP:-$PWD/.custom-src}"
+
+log()  { printf '[custom] %s\n' "$*"; }
+warn() { printf '::warning::%s\n' "$*"; }
+die()  { printf '::error::%s\n' "$*" >&2; exit 1; }
+
+mkdir -p "$SOURCE_TMP"
+[ -s "$THIRD_PARTY_SOURCES_FILE" ] || printf 'Repository\tBranch\tCommit\n' > "$THIRD_PARTY_SOURCES_FILE"
+
+############################ 通用工具 ############################
+
+# 探测外部仓库实际存在的分支（按候选顺序），上游改分支名也不会失败
+detect_branch() {
+  local repo_url="$1"
+  shift
+  local candidate
+  for candidate in "$@"; do
+    if git ls-remote --exit-code --heads "$repo_url" "$candidate" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+record_revision() {
+  local repo_url="$1" branch="$2" dir="$3" commit revision
+  commit="$(git -C "$dir" rev-parse HEAD)"
+  printf -v revision '%s\t%s\t%s' "$repo_url" "$branch" "$commit"
+  grep -Fqx -- "$revision" "$THIRD_PARTY_SOURCES_FILE" 2>/dev/null \
+    || printf '%s\n' "$revision" >> "$THIRD_PARTY_SOURCES_FILE"
+}
+
+# fetch_repo <url> <临时目录> <候选分支...>
+fetch_repo() {
+  local url="$1" dest="$2"
+  shift 2
+  local branch attempt
+  branch="$(detect_branch "$url" "$@")" || { warn "分支探测失败（$*）: $url"; return 1; }
+  rm -rf "$dest"
+  for ((attempt = 1; attempt <= 3; attempt++)); do
+    if git clone --depth=1 --no-tags --single-branch --branch "$branch" "$url" "$dest" >/dev/null 2>&1; then
+      record_revision "$url" "$branch" "$dest"
+      log "已获取 $url [$branch]"
+      return 0
+    fi
+    warn "克隆失败，重试 ${attempt}/3: $url"
+    sleep $((attempt * 5))
+  done
+  warn "克隆最终失败: $url"
+  return 1
+}
+
+# config_set <config文件> <符号> <y|n|m>
+config_set() {
+  local file="$1" symbol="$2" value="$3"
+  [ -f "$file" ] || { warn "配置文件不存在，跳过: $file"; return 0; }
+  if grep -Eq "^${symbol}=|^#[[:space:]]+${symbol}[[:space:]]+is[[:space:]]+not[[:space:]]+set" "$file"; then
+    sed -i -E "s|^(${symbol})=.*|\1=${value}|; s|^#[[:space:]]+(${symbol})[[:space:]]+is[[:space:]]+not[[:space:]]+set|\1=${value}|" "$file"
+  else
+    printf '%s=%s\n' "$symbol" "$value" >> "$file"
+  fi
+}
+
+# 目录存在就删，不存在也不报错
+safe_rm() {
+  local target
+  for target in "$@"; do
+    rm -rf "$target" 2>/dev/null || true
+  done
+}
+
+############################ 1. 定制清单写入主线配置副本 ############################
+# 注意：改的是 CI 工作区里 configs/General.config 的副本，不会提交回仓库，
+# 因此上游随时改 General.config 都不会产生 git 冲突。
+
+log "应用定制清单: ${CUSTOM_DIR}/packages.seed"
+if [ -f "${CUSTOM_DIR}/packages.seed" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%$'\r'}"
+    case "$line" in
+      ''|'###'*) continue ;;
+    esac
+    if [[ "$line" =~ ^#[[:space:]]+(CONFIG_[A-Za-z0-9_.-]+)[[:space:]]+is[[:space:]]+not[[:space:]]+set ]]; then
+      config_set "$GENERAL_CONFIG" "${BASH_REMATCH[1]}" n
+    elif [[ "$line" =~ ^(CONFIG_[A-Za-z0-9_.-]+)=(y|n|m|is[[:space:]]+not[[:space:]]+set)$ ]]; then
+      config_set "$GENERAL_CONFIG" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    elif [[ "$line" =~ ^(CONFIG_[A-Za-z0-9_.-]+)=(\"?[^\"]*\"?)$ ]]; then
+      config_set "$GENERAL_CONFIG" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    else
+      warn "无法解析的定制行，已忽略: $line"
+    fi
+  done < "${CUSTOM_DIR}/packages.seed"
+else
+  warn "未找到 ${CUSTOM_DIR}/packages.seed，沿用脚本内置默认值"
+  config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-theme-argon y
+  config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-app-argon-config y
+  config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-theme-aurora n
+  config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-app-aurora-config n
+  config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_kmod-tun y
+fi
+
+# 这些是硬需求，不管 seed 怎么写都强制生效
+config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_kmod-tun y
+config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-theme-argon y
+config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-theme-aurora n
+config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-app-aurora-config n
+
+############################ 2. 删除 Aurora 主题 ############################
+
+log "移除 Aurora 主题及其配置插件"
+safe_rm \
+  feeds/luci/themes/luci-theme-aurora \
+  feeds/luci/applications/luci-app-aurora-config \
+  package/feeds/luci/luci-theme-aurora \
+  package/feeds/luci/luci-app-aurora-config \
+  package/luci-theme-aurora \
+  package/luci-app-aurora-config
+
+# 源码树里任何地方残留的 aurora 目录一并清理（防止 feeds 结构变化后漏网）
+while IFS= read -r leftover; do
+  safe_rm "$leftover"
+done < <(find package feeds -maxdepth 4 -type d \( -name 'luci-theme-aurora' -o -name 'luci-app-aurora-config' \) -print 2>/dev/null || true)
+
+############################ 3. 拉取第三方软件包 ############################
+
+log "拉取第三方软件包"
+ez_dir="$SOURCE_TMP/easytier"
+zt_dir="$SOURCE_TMP/zerotier"
+ddns_dir="$SOURCE_TMP/ddns-go"
+istore_dir="$SOURCE_TMP/istore"
+
+# --- EasyTier（含 luci-app-easytier）---
+if fetch_repo https://github.com/EasyTier/luci-app-easytier.git "$ez_dir" main master; then
+  safe_rm package/easytier
+  mkdir -p package/easytier
+  cp -a "$ez_dir/." package/easytier/
+  # 只保留实际需要的目录，避免同名包被同时选中
+  if [ "$EASYTIER_VARIANT" = "noweb" ]; then
+    safe_rm package/easytier/easytier
+    config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_easytier-noweb y
+    config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_easytier n
+  else
+    safe_rm package/easytier/easytier-noweb
+    config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_easytier y
+    config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_easytier-noweb n
+  fi
+  config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-app-easytier y
+else
+  warn "EasyTier 获取失败，本次编译将不含 EasyTier"
+fi
+
+# --- ZeroTier（用 mwarning 维护的新版包替换 feeds 旧版）---
+if fetch_repo https://github.com/mwarning/zerotier-openwrt.git "$zt_dir" master main; then
+  safe_rm feeds/packages/net/zerotier package/feeds/packages/zerotier package/zerotier
+  if [ -d "$zt_dir/zerotier" ]; then
+    mv "$zt_dir/zerotier" package/zerotier
+    config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_zerotier y
+    config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-app-zerotier y
+  else
+    warn "zerotier 包目录结构变化，未找到 zerotier/ 子目录"
+  fi
+else
+  warn "ZeroTier 获取失败，回退到 feeds 自带版本"
+  config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_zerotier y
+  config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-app-zerotier y
+fi
+
+# --- ddns-go ---
+if fetch_repo https://github.com/sirpdboy/luci-app-ddns-go.git "$ddns_dir" main master; then
+  safe_rm feeds/packages/net/ddns-go package/feeds/packages/ddns-go package/ddns-go
+  safe_rm feeds/luci/applications/luci-app-ddns-go package/feeds/luci/luci-app-ddns-go package/luci-app-ddns-go
+  [ -d "$ddns_dir/ddns-go" ] && mv "$ddns_dir/ddns-go" package/ddns-go
+  [ -d "$ddns_dir/luci-app-ddns-go" ] && mv "$ddns_dir/luci-app-ddns-go" package/luci-app-ddns-go
+  config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_ddns-go y
+  config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-app-ddns-go y
+else
+  warn "ddns-go 获取失败，本次编译将不含 ddns-go"
+fi
+
+# --- iStore ---
+if fetch_repo https://github.com/linkease/istore.git "$istore_dir" main master; then
+  safe_rm package/istore
+  if [ -d "$istore_dir/luci" ]; then
+    mv "$istore_dir/luci" package/istore
+    config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-app-store y
+  elif [ -d "$istore_dir/luci-app-store" ]; then
+    mkdir -p package/istore
+    cp -a "$istore_dir/." package/istore/
+    config_set "$GENERAL_CONFIG" CONFIG_PACKAGE_luci-app-store y
+  else
+    warn "istore 目录结构变化，未找到 luci/ 子目录"
+  fi
+else
+  warn "iStore 获取失败，本次编译将不含 iStore"
+fi
+
+safe_rm "$SOURCE_TMP"
+
+############################ 4. 默认主题切换为 argon ############################
+
+log "设置默认主题为 ${DEFAULT_THEME}"
+theme_switched=0
+while IFS= read -r cfg_file; do
+  [ -f "$cfg_file" ] || continue
+  if grep -q "mediaurlbase" "$cfg_file"; then
+    before="$(md5sum "$cfg_file" | awk '{print $1}')"
+    sed -i -E "s#(option[[:space:]]+mediaurlbase[[:space:]]+')[^']*(')#\1/luci-static/${DEFAULT_THEME}\2#g" "$cfg_file"
+    after="$(md5sum "$cfg_file" | awk '{print $1}')"
+    [ "$before" != "$after" ] && { log "  默认主题写入: $cfg_file"; theme_switched=1; }
+  fi
+done < <(grep -rl "mediaurlbase" feeds package 2>/dev/null || true)
+
+# 兜底：固件首次开机时强制写 uci，即便上面没找到配置文件也能生效
+uci_dir="package/base-files/files/etc/uci-defaults"
+mkdir -p "$uci_dir"
+cat > "${uci_dir}/99_custom_default_theme" <<EOF
+#!/bin/sh
+# 由 roc-customize.sh 注入：把 LuCI 默认主题固定为 ${DEFAULT_THEME}
+[ -x /bin/uci ] || [ -x /sbin/uci ] || exit 0
+[ -f /etc/config/luci ] || touch /etc/config/luci
+uci -q set luci.main=core
+uci -q set luci.main.mediaurlbase='/luci-static/${DEFAULT_THEME}'
+uci -q commit luci
+exit 0
+EOF
+chmod +x "${uci_dir}/99_custom_default_theme"
+log "  已注入 uci-defaults 兜底脚本"
+
+# 确认 argon 主题源码确实存在，缺失就直接判定失败
+if [ ! -d "feeds/luci/themes/luci-theme-argon" ] && [ ! -d "package/luci-theme-argon" ]; then
+  die "未找到 luci-theme-argon 源码，无法设置默认主题"
+fi
+[ "$theme_switched" -eq 1 ] || warn "未在 feeds 中定位到 mediaurlbase 配置文件，已依赖 uci-defaults 兜底"
+
+############################ 5. 刷新索引并自检 ############################
+
+# 强制 make defconfig 重新扫描 package/ 树，保证新加入的包能被识别
+safe_rm tmp/.packageinfo tmp/.targetinfo tmp/.packageauxvars
+
+log "定制完成："
+grep -E "^CONFIG_PACKAGE_(kmod-tun|luci-theme-argon|luci-app-argon-config|luci-theme-aurora|zerotier|luci-app-zerotier|easytier|easytier-noweb|luci-app-easytier|ddns-go|luci-app-ddns-go|luci-app-store)=" "$GENERAL_CONFIG" || true
