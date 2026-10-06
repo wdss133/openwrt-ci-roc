@@ -62,7 +62,7 @@
 | `custom/packages.seed` | 新增/启用插件清单（改包只改这里） |
 | `custom/devices.include`、`devices.exclude` | 机型白名单 / 黑名单 |
 
-上游源码：https://github.com/laipeng668/openwrt-6.x（分支 25.12-nss）。
+上游源码：https://github.com/laipeng668/openwrt-6.x.git（分支 25.12-nss）。
 
 ---
 _本 README 由 `scripts/custom/gen-readme.sh` 自动生成；要改内容请改脚本或 `custom/` 配置，勿手工大改。_
