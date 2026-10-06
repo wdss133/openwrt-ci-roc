@@ -49,6 +49,7 @@ env:
   CUSTOM_DIR: custom
   ARTIFACT_PREFIX: IPQ807X-Custom
   RELEASE_TAG: IPQ807X-Custom
+  KEEP_MONTHS: "36"
 
 jobs:
 
@@ -405,115 +406,56 @@ jobs:
         name: firmware-${{ env.ARTIFACT_PREFIX }}
         path: artifacts/firmware
 
-    - name: Prepare Release Meta(生成发布标签与插件信息)
-      id: meta
-      run: |
-        set -Eeuo pipefail
-        echo "latest_tag=${RELEASE_TAG}-latest" >> "$GITHUB_OUTPUT"
-        echo "month_tag=${RELEASE_TAG}-$(date -u +%Y%m)" >> "$GITHUB_OUTPUT"
-        echo "now=$(date -u '+%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
-
-        # 本分支新添加的内置（表由 roc-customize.sh 生成：表头 + 6 行）
-        added_table="$(cat artifacts/firmware/*.plugins.md 2>/dev/null || echo '（未采集到）')"
-
-        # 默认内置：从固件清单取 luci 应用/主题，排除本分支新增的
-        NEW_LUCI=" luci-app-easytier luci-app-zerotier luci-app-ddns-go luci-app-store luci-app-wechatpush "
-        MAN="$(ls artifacts/firmware/*.manifest 2>/dev/null | head -n 1 || true)"
-        def_list=""; def_table=""
-        while read -r name ver; do
-          [ -n "$name" ] || continue
-          case "$name" in luci-app-*|luci-theme-*) ;; *) continue ;; esac
-          case "$NEW_LUCI" in *" $name "*) continue ;; esac
-          def_list="${def_list:+${def_list}、}${name}"
-          def_table="${def_table}| ${name} | ${ver} | （随上游 feeds） | openwrt feeds |\n"
-        done < <(awk 'NF>=3{print $1, $3}' "$MAN" 2>/dev/null || true)
-
-        printf 'def_list=%s\n' "$def_list" >> "$GITHUB_OUTPUT"
-        {
-          echo "plugins<<PLUGINS_EOF"
-          echo "**🆕 本分支新添加内置（编译时拉取的上游版本）**"
-          echo ""
-          printf '%s\n' "$added_table"
-          echo ""
-          echo "**📦 默认内置（随镜像自带）**"
-          echo ""
-          echo "| 插件 | 版本 | 上游最近更新 | 仓库 |"
-          echo "|---|---|---|---|"
-          printf '%b' "$def_table"
-          echo "PLUGINS_EOF"
-        } >> "$GITHUB_OUTPUT"
-
-    - name: Publish Latest(发布/更新固定链接的 latest)
-      uses: ncipollo/release-action@v1
-      with:
-        name: ${{ env.RELEASE_TAG }} latest
-        tag: ${{ steps.meta.outputs.latest_tag }}
-        allowUpdates: true
-        replacesArtifacts: true
-        artifactErrorsFailBuild: true
-        token: ${{ github.token }}
-        artifacts: artifacts/firmware/*
-        body: |
-          > 🔗 **滚动 latest**：下载链接固定，固件随每次编译更新为最新。历史版本见 `${{ env.RELEASE_TAG }}-YYYYMM` 月度归档。
-          **IPQ807X 定制固件（自动编译发布）**
-          ### 📒 固件信息
-          - 基于主线 laipeng668/openwrt-6.x（${{ env.SOURCE_BRANCH }}）自动同步编译
-          - 默认主题：**argon**（已移除 Aurora 主题及配置插件）
-          - **默认内置**：${{ steps.meta.outputs.def_list }}
-          - **本分支新添加内置**：kmod-tun、EasyTier、ZeroTier、ddns-go、iStore、wechatpush
-          - 🌐 默认地址：**192.168.2.1**
-          - 🔑 默认密码：none
-          ### 🧊 固件版本
-          - 内核版本：**${{ needs.Build.outputs.version_kernel }}**
-          - 编译时间：${{ steps.meta.outputs.now }}
-          - 目标机型：redmi_ax6-stock（squashfs: factory.ubi / sysupgrade.bin）
-          ### 🧩 内置插件（编译时拉取的上游版本）
-          ${{ steps.meta.outputs.plugins }}
-
-    - name: Publish Monthly Archive(发布/更新本月归档)
-      uses: ncipollo/release-action@v1
-      with:
-        name: ${{ steps.meta.outputs.month_tag }}（月度归档）
-        tag: ${{ steps.meta.outputs.month_tag }}
-        allowUpdates: true
-        replacesArtifacts: true
-        artifactErrorsFailBuild: true
-        token: ${{ github.token }}
-        artifacts: artifacts/firmware/*
-        body: |
-          > 📦 本月归档，同月内随编译更新为本月最新固件。
-          **IPQ807X 定制固件（自动编译发布）**
-          ### 📒 固件信息
-          - 基于主线 laipeng668/openwrt-6.x（${{ env.SOURCE_BRANCH }}）自动同步编译
-          - 默认主题：**argon**（已移除 Aurora 主题及配置插件）
-          - **默认内置**：${{ steps.meta.outputs.def_list }}
-          - **本分支新添加内置**：kmod-tun、EasyTier、ZeroTier、ddns-go、iStore、wechatpush
-          - 🌐 默认地址：**192.168.2.1**
-          - 🔑 默认密码：none
-          ### 🧊 固件版本
-          - 内核版本：**${{ needs.Build.outputs.version_kernel }}**
-          - 编译时间：${{ steps.meta.outputs.now }}
-          - 目标机型：redmi_ax6-stock（squashfs: factory.ubi / sysupgrade.bin）
-          ### 🧩 内置插件（编译时拉取的上游版本）
-          ${{ steps.meta.outputs.plugins }}
-
-    - name: Prune Old Releases(清理旧 Release)
+    - name: Release & Prune(发布固件并清理旧版本)
       env:
         GH_TOKEN: ${{ github.token }}
+        VERSION_KERNEL: ${{ needs.Build.outputs.version_kernel }}
       run: |
         set -Eeuo pipefail
-        KEEP_MONTHS=36
-        tags="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 300 --json tagName --jq '.[].tagName')"
-        keep="$(printf '%s\n' "$tags" | grep -E "^${RELEASE_TAG}-[0-9]{6}$" | sort -r | head -n "$KEEP_MONTHS" || true)"
-        keep="${keep}"$'\n'"${RELEASE_TAG}-latest"
-        echo "保留: $(printf '%s' "$keep" | tr '\n' ' ')"
-        printf '%s\n' "$tags" | while read -r t; do
-          [ -n "$t" ] || continue
-          case "$t" in
-            "${RELEASE_TAG}"|"${RELEASE_TAG}"-*) ;;
-            *) continue ;;
-          esac
-          printf '%s\n' "$keep" | grep -qx -- "$t" && continue
-          echo "删除旧 Release: $t"
-          gh release delete "$t" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
-        done
+        chmod +x "$GITHUB_WORKSPACE/scripts/custom/release.sh"
+        "$GITHUB_WORKSPACE/scripts/custom/release.sh" \
+          "$GITHUB_WORKSPACE/artifacts/firmware" "$RELEASE_TAG" "${KEEP_MONTHS:-36}"
+
+  Docs:
+    needs: [Sync-Upstream]
+    # 即使 Sync-Upstream 被跳过也运行：让 README 始终反映仓库实际配置
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Checkout(检出代码)
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Fetch Custom Overlay(拉取定制分支配置)
+      run: |
+        set -Eeuo pipefail
+        if git ls-remote --exit-code --heads origin "$CUSTOM_BRANCH" >/dev/null 2>&1; then
+          git fetch --depth=1 --no-tags origin "$CUSTOM_BRANCH"
+          rm -rf .tmp-custom && mkdir -p .tmp-custom
+          git archive FETCH_HEAD "$CUSTOM_DIR" 2>/dev/null | tar -x -C .tmp-custom || true
+          if [ -d ".tmp-custom/$CUSTOM_DIR" ]; then
+            rm -rf "$CUSTOM_DIR"; cp -a ".tmp-custom/$CUSTOM_DIR" "$CUSTOM_DIR"
+          fi
+          rm -rf .tmp-custom
+        fi
+
+    - name: Regenerate README(按实际配置重写 README)
+      env:
+        KEEP_MONTHS: ${{ env.KEEP_MONTHS }}
+      run: |
+        set -Eeuo pipefail
+        chmod +x scripts/custom/gen-readme.sh
+        scripts/custom/gen-readme.sh "$GITHUB_WORKSPACE"
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        if [ -n "$(git status --porcelain README.md)" ]; then
+          git add README.md
+          git commit -m "docs: regenerate README from current configuration"
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME:-master}" || true
+          git push origin "HEAD:${GITHUB_REF_NAME:-master}" || echo "::warning::README 推送失败（可能权限/冲突），不影响编译"
+        else
+          echo "README 无变化"
+        fi
