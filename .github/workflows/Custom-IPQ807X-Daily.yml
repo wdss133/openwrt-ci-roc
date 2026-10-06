@@ -476,7 +476,7 @@ jobs:
         GH_TOKEN: ${{ github.token }}
       run: |
         set -Eeuo pipefail
-        KEEP_MONTHS=12
+        KEEP_MONTHS=36
         tags="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 300 --json tagName --jq '.[].tagName')"
         keep="$(printf '%s\n' "$tags" | grep -E "^${RELEASE_TAG}-[0-9]{6}$" | sort -r | head -n "$KEEP_MONTHS" || true)"
         keep="${keep}"$'\n'"${RELEASE_TAG}-latest"
