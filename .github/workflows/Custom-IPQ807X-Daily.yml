@@ -409,8 +409,8 @@ jobs:
       id: meta
       run: |
         set -Eeuo pipefail
-        tag="${RELEASE_TAG}-$(date -u +%Y%m%d-%H%M)"
-        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+        echo "latest_tag=${RELEASE_TAG}-latest" >> "$GITHUB_OUTPUT"
+        echo "month_tag=${RELEASE_TAG}-$(date -u +%Y%m)" >> "$GITHUB_OUTPUT"
         echo "now=$(date -u '+%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
         f="$(ls artifacts/firmware/*.plugins.md 2>/dev/null | head -n 1 || true)"
         if [ -n "$f" ]; then
@@ -419,17 +419,18 @@ jobs:
           echo "plugins=（未采集到插件版本信息）" >> "$GITHUB_OUTPUT"
         fi
 
-    - name: Upload Firmware To Release(发布固件)
+    - name: Publish Latest(发布/更新固定链接的 latest)
       uses: ncipollo/release-action@v1
       with:
-        name: ${{ steps.meta.outputs.tag }}
-        tag: ${{ steps.meta.outputs.tag }}
-        allowUpdates: false
-        replacesArtifacts: false
+        name: ${{ env.RELEASE_TAG }} latest
+        tag: ${{ steps.meta.outputs.latest_tag }}
+        allowUpdates: true
+        replacesArtifacts: true
         artifactErrorsFailBuild: true
         token: ${{ github.token }}
         artifacts: artifacts/firmware/*
         body: |
+          > 🔗 **滚动 latest**：下载链接固定，固件随每次编译更新为最新。历史版本见 `${{ env.RELEASE_TAG }}-YYYYMM` 月度归档。
           **IPQ807X 定制固件（自动编译发布）**
           ### 📒 固件信息
           - 基于主线 laipeng668/openwrt-6.x（${{ env.SOURCE_BRANCH }}）自动同步编译
@@ -443,3 +444,50 @@ jobs:
           - 目标机型：redmi_ax6-stock（squashfs: factory.ubi / sysupgrade.bin）
           ### 🧩 内置插件（编译时拉取的上游版本）
           ${{ steps.meta.outputs.plugins }}
+
+    - name: Publish Monthly Archive(发布/更新本月归档)
+      uses: ncipollo/release-action@v1
+      with:
+        name: ${{ steps.meta.outputs.month_tag }}（月度归档）
+        tag: ${{ steps.meta.outputs.month_tag }}
+        allowUpdates: true
+        replacesArtifacts: true
+        artifactErrorsFailBuild: true
+        token: ${{ github.token }}
+        artifacts: artifacts/firmware/*
+        body: |
+          > 📦 本月归档，同月内随编译更新为本月最新固件。
+          **IPQ807X 定制固件（自动编译发布）**
+          ### 📒 固件信息
+          - 基于主线 laipeng668/openwrt-6.x（${{ env.SOURCE_BRANCH }}）自动同步编译
+          - 默认主题：**argon**（已移除 Aurora 主题及配置插件）
+          - 已内置：**kmod-tun**、EasyTier、ZeroTier、ddns-go、iStore、wechatpush
+          - 🌐 默认地址：**192.168.2.1**
+          - 🔑 默认密码：none
+          ### 🧊 固件版本
+          - 内核版本：**${{ needs.Build.outputs.version_kernel }}**
+          - 编译时间：${{ steps.meta.outputs.now }}
+          - 目标机型：redmi_ax6-stock（squashfs: factory.ubi / sysupgrade.bin）
+          ### 🧩 内置插件（编译时拉取的上游版本）
+          ${{ steps.meta.outputs.plugins }}
+
+    - name: Prune Old Releases(清理旧 Release)
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -Eeuo pipefail
+        KEEP_MONTHS=12
+        tags="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 300 --json tagName --jq '.[].tagName')"
+        keep="$(printf '%s\n' "$tags" | grep -E "^${RELEASE_TAG}-[0-9]{6}$" | sort -r | head -n "$KEEP_MONTHS" || true)"
+        keep="${keep}"$'\n'"${RELEASE_TAG}-latest"
+        echo "保留: $(printf '%s' "$keep" | tr '\n' ' ')"
+        printf '%s\n' "$tags" | while read -r t; do
+          [ -n "$t" ] || continue
+          case "$t" in
+            "${RELEASE_TAG}"|"${RELEASE_TAG}"-*) ;;
+            *) continue ;;
+          esac
+          printf '%s\n' "$keep" | grep -qx -- "$t" && continue
+          echo "删除旧 Release: $t"
+          gh release delete "$t" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+        done
