@@ -1,6 +1,6 @@
 # IPQ807X 定制固件 CI
 
-> 本仓库是 [laipeng668/openwrt-ci-roc](https://github.com/laipeng668/openwrt-ci-roc.git) 的**定制分支**：在其基础上自动编译并发布
+> 本仓库是 [laipeng668/openwrt-ci-roc](https://github.com/laipeng668/openwrt-ci-roc) 的**定制分支**：在其基础上自动编译并发布
 > **红米 AX6（redmi_ax6_stock）** 专用固件。所有定制均以**新增文件 + 幂等脚本**实现，上游同步不产生冲突，
 > 换上游分支 / 重新 fork 后按原要求照跑。
 
@@ -10,7 +10,7 @@
 只编译下列机型（其余全部关闭，缩短编译时间）：
 
 - redmi_ax6-stock
-- 另排除：zyxel_nwa210ax�zyxel_nwa110ax
+- 另排除：zyxel_nwa210ax、zyxel_nwa110ax
 
 ### 2) 默认主题
 - 默认主题改为 **argon**，并移除 Aurora 主题及其配置插件。
@@ -62,7 +62,7 @@
 | `custom/packages.seed` | 新增/启用插件清单（改包只改这里） |
 | `custom/devices.include`、`devices.exclude` | 机型白名单 / 黑名单 |
 
-上游源码：https://github.com/laipeng668/openwrt-6.x.git（分支 25.12-nss）。
+上游源码：https://github.com/laipeng668/openwrt-6.x（分支 25.12-nss）。
 
 ---
 _本 README 由 `scripts/custom/gen-readme.sh` 自动生成；要改内容请改脚本或 `custom/` 配置，勿手工大改。_
