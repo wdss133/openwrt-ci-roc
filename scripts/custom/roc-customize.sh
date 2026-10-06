@@ -336,6 +336,45 @@ if [ ! -d "feeds/luci/themes/luci-theme-argon" ] && [ ! -d "package/luci-theme-a
 fi
 [ "$theme_switched" -eq 1 ] || warn "未在 feeds 中定位到 mediaurlbase 配置文件，已依赖 uci-defaults 兜底"
 
+############################ 4.5 预启用本分支预装的常驻服务 ############################
+# 很多第三方包的默认配置是 enabled=0（设计如此）：预装进镜像后，"点启动"不会生效，
+# 必须先在 LuCI/uci 里"启用"。这里注入一个首启脚本，把预装服务的默认状态设为"已启用并启动"，
+# 做到刷完即用。全部幂等、缺文件不报错。
+log "注入首启脚本：预启用预装服务（ddns-go / zerotier）"
+uci_dir="package/base-files/files/etc/uci-defaults"
+mkdir -p "$uci_dir"
+cat > "${uci_dir}/98_custom_enable_services" <<'CUSTOM_EOF'
+#!/bin/sh
+# 由 roc-customize.sh 注入：预启用本分支预装的常驻服务，避免"预装了但默认不启动"
+[ -x /sbin/uci ] || [ -x /bin/uci ] || exit 0
+
+# 兜底创建 ddns-go 用户/组（若预装镜像里未生成）
+if [ -x /usr/bin/ddns-go ]; then
+	grep -q '^ddns-go:' /etc/passwd 2>/dev/null || echo 'ddns-go:x:32769:32769:ddns-go:/var/run/ddns-go:/bin/false' >> /etc/passwd
+	grep -q '^ddns-go:' /etc/group 2>/dev/null || echo 'ddns-go:x:32769:' >> /etc/group
+fi
+
+# ddns-go：默认 enabled=0，这里预启用并启动
+if [ -f /etc/config/ddns-go ]; then
+	uci -q set ddns-go.config.enabled='1'
+	uci -q commit ddns-go
+fi
+[ -x /etc/init.d/ddns-go ] && { /etc/init.d/ddns-go enable; /etc/init.d/ddns-go start; }
+
+# zerotier：预启用；并移除默认的 Earth 测试网络，避免自动加入官方网络
+if [ -f /etc/config/zerotier ]; then
+	uci -q set zerotier.global.enabled='1'
+	uci -q delete zerotier.earth
+	while uci -q delete zerotier.@network[0]; do :; done
+	uci -q commit zerotier
+fi
+[ -x /etc/init.d/zerotier ] && { /etc/init.d/zerotier enable; /etc/init.d/zerotier start; }
+
+exit 0
+CUSTOM_EOF
+chmod +x "${uci_dir}/98_custom_enable_services"
+log "  已注入 ${uci_dir}/98_custom_enable_services"
+
 ############################ 5. 机型筛选（白名单优先，其次黑名单）############################
 # - devices.include：只编译这里列出的机型（其余全部取消），编译时间大幅缩短；
 # - devices.exclude：从剩余机型里再剔除（用于出厂分区过小的机型，
