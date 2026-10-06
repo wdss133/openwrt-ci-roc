@@ -400,6 +400,11 @@ jobs:
       contents: write
       actions: read
     steps:
+    - name: Checkout(检出代码)
+      uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+
     - name: Download Firmware Artifact(下载固件产物)
       uses: actions/download-artifact@v4
       with:
