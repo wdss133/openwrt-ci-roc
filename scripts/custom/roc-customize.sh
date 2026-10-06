@@ -291,7 +291,6 @@ plugin_row() {
   printf '| %s | %s | %s | %s |\n' "$1" "${v:-(见固件清单)}" "${d:-(未知)}" "$4" >> "$PLUGIN_INFO_FILE"
 }
 plugin_row "kmod-tun" "$(pkg_ver "$(find feeds package -path '*kmod-tun/Makefile' -print -quit 2>/dev/null)")" "(随内核 6.12)" "openwrt base"
-plugin_row "argon (luci-theme-argon)" "$(pkg_ver "$(find feeds package -path '*luci-theme-argon/Makefile' -print -quit 2>/dev/null)")" "(随 luci feeds)" "openwrt/luci"
 plugin_row "EasyTier" "$(pkg_ver "package/easytier/luci-app-easytier/Makefile" "package/easytier/easytier-noweb/Makefile")" "$(git_date "$ez_dir")" "https://github.com/EasyTier/luci-app-easytier"
 plugin_row "ZeroTier" "$(pkg_ver "package/zerotier/Makefile")" "$(git_date "$zt_dir")" "https://github.com/mwarning/zerotier-openwrt"
 plugin_row "ddns-go" "$(pkg_ver "package/ddns-go/Makefile")" "$(git_date "$ddns_dir")" "https://github.com/sirpdboy/luci-app-ddns-go"
