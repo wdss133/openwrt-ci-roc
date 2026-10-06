@@ -22,6 +22,7 @@ KEEP_MONTHS="${KEEP_MONTHS:-36}"
 SOURCE_BRANCH="${SOURCE_BRANCH:-25.12-nss}"
 SOURCE_URL="${SOURCE_URL:-https://github.com/laipeng668/openwrt-6.x}"
 UPSTREAM_REPO="${UPSTREAM_REPO:-https://github.com/laipeng668/openwrt-ci-roc}"
+UPSTREAM_URL="${UPSTREAM_REPO%.git}"
 
 strip_list() { grep -vE '^[[:space:]]*(#|$)' "$1" 2>/dev/null | tr -d '\r' || true; }
 
@@ -32,7 +33,7 @@ devices_block() {
     echo "- (未配置 devices.include)"
   fi
   if [ -f "$EXC" ]; then
-    local ex; ex="$(strip_list "$EXC" | paste -sd'、' - || true)"
+    local ex; ex="$(strip_list "$EXC" | awk 'NR==1{printf "%s",$0; next} {printf "、%s",$0}')"
     [ -n "$ex" ] && echo "- 另排除：$ex"
   fi
 }
@@ -48,7 +49,7 @@ OUT="$(mktemp)"
   cat <<EOF
 # IPQ807X 定制固件 CI
 
-> 本仓库是 [laipeng668/openwrt-ci-roc](${UPSTREAM_REPO}) 的**定制分支**：在其基础上自动编译并发布
+> 本仓库是 [laipeng668/openwrt-ci-roc](${UPSTREAM_URL}) 的**定制分支**：在其基础上自动编译并发布
 > **红米 AX6（redmi_ax6_stock）** 专用固件。所有定制均以**新增文件 + 幂等脚本**实现，上游同步不产生冲突，
 > 换上游分支 / 重新 fork 后按原要求照跑。
 
