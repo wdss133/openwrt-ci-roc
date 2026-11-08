@@ -496,7 +496,7 @@ jobs:
         ARCHIVE_TAG: ${{ needs.Gate.outputs.archive_tag }}
         BUILD_YM: ${{ needs.Gate.outputs.build_ym }}
         BUILD_KIND: ${{ needs.Gate.outputs.kind }}
-        KEEP_SNAPSHOTS: ${{ env.KEEP_SNAPSHOTS }}
+        # KEEP_SNAPSHOTS 直接继承工作流级 env，无需在此重复声明
       run: |
         set -Eeuo pipefail
         chmod +x "$GITHUB_WORKSPACE/scripts/custom/release.sh"
