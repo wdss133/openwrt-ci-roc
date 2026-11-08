@@ -2,24 +2,33 @@
 #
 # release.sh —— IPQ807X 定制固件「发布」脚本（与 workflow 解耦，便于 fork / 换分支复用）
 #
+# 编译节奏：每月 3 次 —— 10 日、20 日、当月最后一天（月末由 Gate 判定，适配 28/29/30/31 天）。
+#
 # 职责：
-#   1) 依据固件清单与构建阶段产物，生成发布说明：
-#        - 固件信息里区分「默认内置」与「本分支新添加内置」
-#        - 插件表分两段：先「本分支新添加内置」，再「默认内置」
+#   1) 生成发布说明：区分「默认内置」/「本分支新添加内置」，插件表两段式
 #   2) 发布/更新两个 Release：
-#        - <PREFIX>-latest      滚动最新（下载链接固定）
-#        - <PREFIX>-YYYYMM      本月归档（同月内更新为本月最新）
-#   3) 清理旧 Release：只保留 latest + 最近 KEEP_MONTHS 个月的月度归档，
-#      删除其余以 <PREFIX> 开头的 Release（绝不触碰上游其它 tag，如 IPQ807X）。
+#        - <PREFIX>-latest          滚动最新（下载链接固定，每次编译都更新）
+#        - ${ARCHIVE_TAG}           本次归档，由 Gate 传入：
+#              <PREFIX>-YYYYMM10    10 日快照（仅当月保留）
+#              <PREFIX>-YYYYMM20    20 日快照（仅当月保留）
+#              <PREFIX>-YYYYMM      月末归档（长期保留）
+#              <PREFIX>-YYYYMMDD    手动触发的临时快照
+#   3) 清理旧 Release：
+#        - latest 常驻
+#        - 最近 KEEP_MONTHS 个 -YYYYMM 月度归档（默认 36 = 3 年）
+#        - 本月的 -YYYYMMDD 快照（跨月自动删除 → 上月只留下月末那一份）
+#        - 绝不触碰上游其它 tag（如 IPQ807X）
 #
 # 用法：
 #   release.sh <artifact_dir> [tag_prefix] [keep_months]
 # 环境变量：
-#   GH_TOKEN            必填（contents:write），gh CLI 使用
+#   GH_TOKEN            必填（contents:write）
 #   GITHUB_REPOSITORY   必填（owner/repo）；本地调试可用 REPO 覆盖
-#   VERSION_KERNEL      可选，写入发布说明
-#   SOURCE_BRANCH       可选，默认 25.12-nss
-#   NEW_LUCI            可选，本分支新增的 luci 应用名（空格分隔），用于从「默认内置」里排除
+#   ARCHIVE_TAG         可选，本次归档的完整 tag；缺省退回 <PREFIX>-$(date -u +%Y%m)（兼容旧调用）
+#   BUILD_YM            可选，本次编译所属 YYYYMM（用于判定"本月快照"）；缺省用当前 UTC 月份
+#   BUILD_KIND          可选，d10 / d20 / month_end / manual，仅影响发布说明文案
+#   KEEP_SNAPSHOTS      可选，默认 none（上月只留月末）；设为 20 时额外保留最近 KEEP_MONTHS 个月的 20 日快照
+#   VERSION_KERNEL / SOURCE_BRANCH / NEW_LUCI   可选，写入发布说明
 #
 set -Eeuo pipefail
 
@@ -30,6 +39,9 @@ REPO="${REPO:-${GITHUB_REPOSITORY:-}}"
 SOURCE_BRANCH="${SOURCE_BRANCH:-25.12-nss}"
 VERSION_KERNEL="${VERSION_KERNEL:-unknown}"
 NEW_LUCI="${NEW_LUCI:- luci-app-easytier luci-app-zerotier luci-app-ddns-go luci-app-store luci-app-wechatpush }"
+BUILD_KIND="${BUILD_KIND:-manual}"
+BUILD_YM="${BUILD_YM:-$(date -u +%Y%m)}"
+KEEP_SNAPSHOTS="${KEEP_SNAPSHOTS:-none}"
 
 ADDED_NAMES="${ADDED_NAMES:-kmod-tun、EasyTier、ZeroTier、ddns-go、iStore、wechatpush}"
 
@@ -42,7 +54,17 @@ command -v gh >/dev/null 2>&1 || die "未找到 gh CLI"
 
 NOW="$(date -u '+%Y-%m-%d %H:%M UTC')"
 LATEST_TAG="${PREFIX}-latest"
-MONTH_TAG="${PREFIX}-$(date -u +%Y%m)"
+ARCHIVE_TAG="${ARCHIVE_TAG:-${PREFIX}-$(date -u +%Y%m)}"
+case "$ARCHIVE_TAG" in "${PREFIX}"-*) ;; *) die "ARCHIVE_TAG 必须以 ${PREFIX}- 开头: $ARCHIVE_TAG" ;; esac
+[ "$ARCHIVE_TAG" != "$LATEST_TAG" ] || die "ARCHIVE_TAG 不能等于 latest"
+
+case "$BUILD_KIND" in
+  d10)        ARCHIVE_DESC="10 日快照（仅当月保留，跨月自动清理）"; ARCHIVE_TITLE="${ARCHIVE_TAG}（月度快照 · 10 日）" ;;
+  d20)        ARCHIVE_DESC="20 日快照（仅当月保留，跨月自动清理）"; ARCHIVE_TITLE="${ARCHIVE_TAG}（月度快照 · 20 日）" ;;
+  month_end)  ARCHIVE_DESC="月末归档（长期保留，共 ${KEEP_MONTHS} 期 ≈ 3 年）"; ARCHIVE_TITLE="${ARCHIVE_TAG}（月度归档 · 月末）" ;;
+  *)          ARCHIVE_DESC="手动编译快照（仅当月保留）"; ARCHIVE_TITLE="${ARCHIVE_TAG}（手动编译）" ;;
+esac
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -70,8 +92,9 @@ fi
 BODY="$WORK/body.md"
 {
   echo "> 🔗 **滚动 latest**（\`${LATEST_TAG}\`）：下载链接固定，每次编译后更新为最新成果。"
-  echo "> 📦 **月度归档**（\`${PREFIX}-YYYYMM\`）：同月内每次编译都会覆盖更新，保留的是**该月最后一次成功编译**的产物（每天北京时间 21:00 自动编译 ⇒ 通常就是当月最后一天的成果）。"
-  echo "> 🗂️ **保留策略**：\`latest\` 常驻 + 最近 **${KEEP_MONTHS}** 个月度归档（约 3 年），更早的自动清理；上游 \`IPQ807X\` 等其它 Release 一律不动。"
+  echo "> 📅 **编译节奏**：每月仅 3 次 —— **10 日、20 日、当月最后一天**（自动适配 28/29/30/31 天与闰年），北京时间 21:00。"
+  echo "> 📦 **本次归档**（\`${ARCHIVE_TAG}\`）：${ARCHIVE_DESC}。"
+  echo "> 🗂️ **保留策略**：\`latest\` 常驻 + 最近 **${KEEP_MONTHS}** 个月的月末归档（约 3 年）；10 日 / 20 日快照只在当月有效，**跨月后上月只留下月末那一份**；上游 \`IPQ807X\` 等其它 Release 一律不动。"
   echo ""
   echo "**IPQ807X 定制固件（自动编译发布）**"
   echo "### 📒 固件信息"
@@ -113,14 +136,36 @@ publish() {
 }
 
 publish "$LATEST_TAG" "${PREFIX} latest"
-publish "$MONTH_TAG" "${MONTH_TAG}（月度归档）"
+publish "$ARCHIVE_TAG" "$ARCHIVE_TITLE"
 
 ############################ 3) 清理旧 Release ############################
+#
+# 说明：GitHub 对 Release 数量、Release 总体积、下载带宽都没有上限（单个 Release ≤1000 个资产、
+# 单个文件 <2 GiB），所以 3 年 = 36 份归档完全放得下，不必降到 2 年。真正需要控制的是
+# Actions artifact 存储（Free 账号 0.5 GB）与编译分钟数，那部分由"每月 3 次 + artifact 保留 3 天"负责。
+#
+tags="$(gh release list --repo "$REPO" --limit 1000 --json tagName --jq '.[].tagName')"
 
-tags="$(gh release list --repo "$REPO" --limit 300 --json tagName --jq '.[].tagName')"
-keep="$(printf '%s\n' "$tags" | grep -E "^${PREFIX}-[0-9]{6}$" | sort -r | head -n "$KEEP_MONTHS" || true)"
-keep="${keep}"$'\n'"$LATEST_TAG"
-log "保留: $(printf '%s' "$keep" | tr '\n' ' ')"
+# 3.1 最近 KEEP_MONTHS 个「月末归档」 -YYYYMM
+month_keep="$(printf '%s\n' "$tags" | grep -E "^${PREFIX}-[0-9]{6}$" | sort -r | head -n "$KEEP_MONTHS" || true)"
+
+# 3.2 本月的日快照 -YYYYMMDD（跨月后自然落在保留集合之外，被自动删除）
+day_keep="$(printf '%s\n' "$tags" | grep -E "^${PREFIX}-${BUILD_YM}[0-9]{2}$" || true)"
+
+keep="$(printf '%s\n%s\n%s\n' "$month_keep" "$day_keep" "$LATEST_TAG" | sed '/^$/d')"
+
+# 3.3 可选：若 KEEP_SNAPSHOTS=20，额外保留同样 36 个月里每月 20 日的快照
+if [ "$KEEP_SNAPSHOTS" = "20" ]; then
+  for ym in $(printf '%s\n' "$month_keep" | sed -E "s/^${PREFIX}-([0-9]{6})$/\1/"); do
+    t20="${PREFIX}-${ym}20"
+    if printf '%s\n' "$tags" | grep -qx -- "$t20"; then
+      keep="${keep}"$'\n'"$t20"
+    fi
+  done
+fi
+
+keep="$(printf '%s\n' "$keep" | sed '/^$/d' | sort -u)"
+log "保留集合: $(printf '%s' "$keep" | tr '\n' ' ')"
 
 printf '%s\n' "$tags" | while read -r t; do
   [ -n "$t" ] || continue
@@ -128,7 +173,7 @@ printf '%s\n' "$tags" | while read -r t; do
     "${PREFIX}"|"${PREFIX}"-*) ;;
     *) continue ;;   # 非本前缀（例如上游 IPQ807X）一律不动
   esac
-  printf '%s\n' "$keep" | grep -qx -- "$t" && continue
+  if printf '%s\n' "$keep" | grep -qx -- "$t"; then continue; fi
   log "删除旧 Release: $t"
   gh release delete "$t" --repo "$REPO" --yes --cleanup-tag || true
 done

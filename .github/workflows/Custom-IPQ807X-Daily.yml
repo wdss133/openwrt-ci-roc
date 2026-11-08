@@ -1,6 +1,12 @@
 name: Custom-IPQ807X-Daily
 
-# 每天北京时间 21:00（UTC 13:00）自动：同步上游主线 -> 应用定制 -> 编译 IPQ807X -> 发布
+# 每月 3 次、北京时间 21:00（UTC 13:00）自动：同步上游主线 -> 应用定制 -> 编译 IPQ807X -> 发布
+#   编译日：每月 10 日、20 日、以及「当月最后一天」（自动适配 28/29/30/31 天与闰年 2 月）
+#   设计要点：POSIX cron 没有 L（last day）语法，所以把 28~31 全部列进 cron，
+#             再由 Gate job 用「明天是不是 1 号」判定真正的月末，非月末直接跳过，不产生编译。
+#   降频原因：Free 账号 Actions artifact 存储只有 0.5 GB；每天编译 + 3 天保留会把额度撑满并
+#             触发 $0 预算阻断（表现为其它仓库 "No jobs were run"）。每月 3 次后任一时刻
+#             最多 1 个 artifact 存活，安全。
 # 本文件是新增文件，不修改上游任何既有文件，因此上游同步不会冲突。
 #
 # 前置设置（只需一次）：
@@ -8,7 +14,8 @@ name: Custom-IPQ807X-Daily
 #   否则同步结果无法回推、Release 无法创建（编译本身不受影响）。
 on:
   schedule:
-    - cron: "0 13 * * *"
+    # UTC 13:00 == 北京 21:00；日字段只列 10/20/28/29/30/31，其余日子根本不会触发。
+    - cron: "0 13 10,20,28,29,30,31 * *"
   workflow_dispatch:
     inputs:
       sync_upstream:
@@ -49,12 +56,81 @@ env:
   CUSTOM_DIR: custom
   ARTIFACT_PREFIX: IPQ807X-Custom
   RELEASE_TAG: IPQ807X-Custom
+  # 36 个月 = 3 年。Release 数量/总体积/带宽 GitHub 都没有上限，不需要降到 2 年；
+  # 真要省就改这里为 24（2 年）。若想让上月除了月末归档外还保留 20 日快照，设为 "20"。
   KEEP_MONTHS: "36"
+  KEEP_SNAPSHOTS: "none"
 
 jobs:
 
+  # ---------------------------------------------------------------------------
+  # Gate：把「日历语义」从 cron 里解耦出来，保证每月恰好 3 次编译
+  #   10 日 / 20 日                 -> 固定编译
+  #   28/29/30/31 日且明天是 1 号  -> 月末编译（唯一真正的月末判定）
+  #   其余 28~31 日                -> 跳过（不占用 runner、不产生 artifact）
+  #   手动 workflow_dispatch       -> 始终编译（不受日历限制）
+  # ---------------------------------------------------------------------------
+  Gate:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      kind: ${{ steps.decide.outputs.kind }}
+      build_ym: ${{ steps.decide.outputs.build_ym }}
+      archive_tag: ${{ steps.decide.outputs.archive_tag }}
+    steps:
+    - name: Decide(判定编译日与归档标签)
+      id: decide
+      env:
+        EVENT: ${{ github.event_name }}
+      run: |
+        set -Eeuo pipefail
+        # cron 按 UTC 触发：13:00 UTC == 北京 21:00，且两者是同一个日历日，
+        # 所以直接用 UTC 的年月日即可，无需再做时区换算。
+        # GitHub schedule 可能排队延迟：若被延到次日 00:00~12:59 UTC，
+        # 说明这是「昨天 13:00」那次调度，把意图日期回退一天，避免误判。
+        hh="$(date -u +%H)"
+        d="$(date -u +%Y-%m-%d)"
+        if [ "$hh" -lt 13 ]; then d="$(date -u -d yesterday +%Y-%m-%d)"; fi
+        ymd="${d//-/}"          # 20261130
+        ym="${ymd:0:6}"         # 202611
+        day="${ymd:6:2}"        # 30
+        tomorrow="$(date -u -d "$d +1 day" +%d)"
+
+        build=true; kind=manual; suffix="$ymd"
+        if [ "$EVENT" = "schedule" ]; then
+          case "$day" in
+            10)               kind=d10;       suffix="${ym}10" ;;
+            20)               kind=d20;       suffix="${ym}20" ;;
+            28|29|30|31)
+              if [ "$tomorrow" = "01" ]; then
+                kind=month_end; suffix="$ym"       # 月末归档：-YYYYMM
+              else
+                build=false; kind=skip_not_month_end
+              fi ;;
+            *) build=false; kind="skip_day_${day}" ;;
+          esac
+        fi
+
+        archive_tag=""
+        if [ "$build" = "true" ]; then archive_tag="${RELEASE_TAG}-${suffix}"; fi
+        {
+          echo "build=$build"
+          echo "kind=$kind"
+          echo "build_ym=$ym"
+          echo "archive_tag=$archive_tag"
+        } >> "$GITHUB_OUTPUT"
+        {
+          echo "### 编译日判定"
+          echo "- 触发方式：\`$EVENT\`"
+          echo "- 意图日期(UTC)：\`$d\`（北京 21:00 同日）"
+          echo "- 明天日期号：\`$tomorrow\`"
+          echo "- 结论：\`$kind\` → build=\`$build\`"
+          echo "- 归档 tag：\`${archive_tag:-（本次不编译）}\`"
+        } >> "$GITHUB_STEP_SUMMARY"
+
   Sync-Upstream:
-    if: ${{ github.event_name == 'schedule' || inputs.sync_upstream }}
+    needs: Gate
+    if: ${{ needs.Gate.outputs.build == 'true' && (github.event_name == 'schedule' || inputs.sync_upstream) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -96,8 +172,8 @@ jobs:
         fi
 
   Build:
-    needs: Sync-Upstream
-    if: ${{ always() && needs.Sync-Upstream.result != 'failure' }}
+    needs: [Gate, Sync-Upstream]
+    if: ${{ always() && needs.Gate.outputs.build == 'true' && needs.Sync-Upstream.result != 'failure' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     permissions:
@@ -388,13 +464,15 @@ jobs:
         if-no-files-found: error
         compression-level: 0
         overwrite: true
+        # 每月 3 次、间隔 ≥10 天，任一时刻最多 1 个 artifact 存活；
+        # 3 天保留远低于 Free 账号 0.5 GB 的 Actions artifact 额度（单次约 200 MB）。
         retention-days: 3
 
   Release:
-    needs: Build
+    needs: [Gate, Build]
     # 显式 if：否则当 Sync-Upstream 被跳过（如 sync_upstream=false）时，
     # 默认的 success() 门禁会因"存在被跳过的祖先 job"而失败，导致 Release 被跳过。
-    if: ${{ always() && needs.Build.result == 'success' }}
+    if: ${{ always() && needs.Gate.outputs.build == 'true' && needs.Build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -415,6 +493,10 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
         VERSION_KERNEL: ${{ needs.Build.outputs.version_kernel }}
+        ARCHIVE_TAG: ${{ needs.Gate.outputs.archive_tag }}
+        BUILD_YM: ${{ needs.Gate.outputs.build_ym }}
+        BUILD_KIND: ${{ needs.Gate.outputs.kind }}
+        KEEP_SNAPSHOTS: ${{ env.KEEP_SNAPSHOTS }}
       run: |
         set -Eeuo pipefail
         chmod +x "$GITHUB_WORKSPACE/scripts/custom/release.sh"
@@ -422,9 +504,9 @@ jobs:
           "$GITHUB_WORKSPACE/artifacts/firmware" "$RELEASE_TAG" "${KEEP_MONTHS:-36}"
 
   Docs:
-    needs: [Sync-Upstream]
-    # 即使 Sync-Upstream 被跳过也运行：让 README 始终反映仓库实际配置
-    if: ${{ always() && !cancelled() }}
+    needs: [Gate, Sync-Upstream]
+    # 只在真正编译时刷新 README；Gate 判定的"非编译日"不产生任何 job
+    if: ${{ always() && !cancelled() && needs.Gate.outputs.build == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

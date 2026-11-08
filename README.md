@@ -28,20 +28,31 @@
 - ddns-go
 - luci-app-ddns-go
 - luci-app-store
-- luci-compat
-- luci-app-wechatpush
 
 其中第三方插件在编译时从各自上游仓库拉取最新版，并在发布说明中记录**版本号与上游更新日期**。
 
-### 4) 发布策略（全自动）
+### 4) 编译节奏与发布策略（全自动）
+**每月只编译 3 次**：10 日、20 日、以及**当月最后一天**，均为北京时间 21:00。
+月末由工作流里的 `Gate` job 用「明天是不是 1 号」判定，cron 列出 28/29/30/31 兜底，
+因此 31 天月、30 天月、平年 2 月 28 日、闰年 2 月 29 日都能正确落在真正的月末，不会多编译也不会漏。
+
 每次编译后：
 - 更新滚动 Release `IPQ807X-Custom-latest` —— **下载链接固定**，永远指向最新固件；
-- 更新当月归档 Release `IPQ807X-Custom-YYYYMM`；
-- 自动清理：仅保留 `latest` 与最近 **36** 个月的月度归档，旧的无上限增长被彻底消除。
+- 10 日 / 20 日：生成当月快照 `IPQ807X-Custom-YYYYMM10` / `-YYYYMM20`（**只在当月有效**）；
+- 月末：生成月度归档 `IPQ807X-Custom-YYYYMM`（长期保留）；
+- **跨月后，上月的 10 日 / 20 日快照自动删除，整月只留下月末那一份**；
+- 保留最近 **36** 个月度归档（约 3 年）；上游 `IPQ807X` 等其它 Release 一律不动。
+
+> 为什么降频：GitHub Free 账号的 Actions artifact 存储只有 **0.5 GB**（Support 也无法调高）。
+> 原来每天编译 + artifact 保留 3 天，会有 3 份约 200 MB 的产物同时存活 → 约 600 MB 超额，
+> 触发 $0 预算阻断（其它仓库会报 "No jobs were run"）。每月 3 次后任一时刻最多 1 份，安全。
+> Release 数量 / 总体积 / 下载带宽 GitHub **没有上限**（单个 Release ≤1000 个资产、单文件 <2 GiB），
+> 所以 3 年归档不受影响。
 
 ### 5) 自动化
-- 每日北京时间 21:00 自动编译（`.github/workflows/Custom-IPQ807X-Daily.yml`）；
-- 也可在 Actions 页手动 `Run workflow`（可选是否先同步上游）。
+- 北京时间 21:00（UTC 13:00）在每月 10 / 20 / 月末自动编译（`.github/workflows/Custom-IPQ807X-Daily.yml`）；
+- 非编译日 cron 虽会命中 28~31 号，但 `Gate` 直接跳过，不占用 runner、不产生 artifact；
+- 也可在 Actions 页手动 `Run workflow` —— **手动触发不受日历限制**，随时可编译。
 
 ## 🚀 刷机
 从 `IPQ807X-Custom-latest` 下载对应文件：
@@ -62,7 +73,7 @@
 | `custom/packages.seed` | 新增/启用插件清单（改包只改这里） |
 | `custom/devices.include`、`devices.exclude` | 机型白名单 / 黑名单 |
 
-上游源码：https://github.com/laipeng668/openwrt-6.x.git（分支 25.12-nss）。
+上游源码：https://github.com/laipeng668/openwrt-6.x（分支 25.12-nss）。
 
 ---
 _本 README 由 `scripts/custom/gen-readme.sh` 自动生成；要改内容请改脚本或 `custom/` 配置，勿手工大改。_
